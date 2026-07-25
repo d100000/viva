@@ -60,6 +60,12 @@ final class VoiceSession {
     ///   「已经逐句上屏 + 松手后又把全文润色一遍整段粘一次」的重复注入，
     ///   而按硬性不变量「只追加绝不退格」，多出来的那一整段永远删不掉。
     private var polishSnapshot = false
+    /// begin() 时刻的整份配置快照，专供润色使用。
+    /// ⚠️ 必须和 polishSnapshot 同源。只快照「要不要润色」而让 LLMPolisher 拿实时 config，
+    ///   会出现：会话中途关掉润色 → handleFinished 仍按快照进入 .polishing，
+    ///   但 LLMPolisher.isConfigured 读实时值判为 false，抛出「润色未配置：缺少
+    ///   API Key 或模型名」—— 一条内容完全错误的红字，用户什么都没配错。
+    private var polishConfigSnapshot: Config?
     /// 本次会话是否有任何一次上屏走了降级路径（Secure Input / 缺权限 / 前台切走）。
     /// 历史记录里的「仅复制」角标要靠它才准。
     private var didFallbackToClipboard = false
@@ -108,16 +114,23 @@ final class VoiceSession {
         // 静默返回是最糟的处理：用户按住热键说了一整段，屏幕上什么都没发生，
         // 说完的话直接蒸发。.finalizing 最长 6 秒、.polishing 最长 5 秒，
         // 这段窗口真实存在，必须告诉用户「在忙，稍候」。
+        // ⚠️ 下面这些 flash 一律用**参数** testMode 把关，不能用 self.testMode ——
+        //   self.testMode 要等过了第一道 guard 才赋值（不能提前，否则会覆盖掉
+        //   正在跑的上一轮会话的 testMode），在此之前它还是上一轮的残值。
+        //   试听模式全程不碰悬浮条：它面向的正是还没授权、还没填 Key 的新用户，
+        //   引导页下方已经有 WarnBanner 显示同一条错误，再浮一条黑胶囊是重复且突兀的。
         guard state == .idle else {
-            hud.flash(message: state == .polishing ? "正在润色上一段，稍候" : "正在收尾上一段，稍候",
-                      duration: 1.2)
+            if !testMode {
+                hud.flash(message: state == .polishing ? "正在润色上一段，稍候" : "正在收尾上一段，稍候",
+                          duration: 1.2)
+            }
             return
         }
         self.testMode = testMode
 
         guard config.hasCredentials else {
             app.lastError = "还没配置 API Key —— 去「设置」页填入"
-            hud.flash(message: app.lastError, isError: true)
+            if !testMode { hud.flash(message: app.lastError, isError: true) }
             return
         }
         // ⚠️ 判据是 canStart 而不是 isRunning。蓝牙输入设备下引擎故意不常驻，
@@ -125,11 +138,12 @@ final class VoiceSession {
         //   用户完全无法录音（详见 AudioCapture.canStart 的注释）。
         guard capture.canStart else {
             app.lastError = "麦克风未就绪，检查系统设置里的麦克风权限"
-            hud.flash(message: app.lastError, isError: true)
+            if !testMode { hud.flash(message: app.lastError, isError: true) }
             return
         }
 
         polishSnapshot = config.polishReady
+        polishConfigSnapshot = config
         deferCommitSnapshot = testMode || config.commitOnlyAtEnd || polishSnapshot
         targetBundleId = TextInjector.frontmostBundleId
         targetAppName = NSWorkspace.shared.frontmostApplication?.localizedName
@@ -186,7 +200,7 @@ final class VoiceSession {
             app.isListening = false
             finishState()
             app.lastError = "麦克风启动失败 —— 蓝牙耳机可能已断开，或正被其它 App 占用"
-            hud.flash(message: app.lastError, isError: true, duration: 2.6)
+            if !testMode { hud.flash(message: app.lastError, isError: true, duration: 2.6) }
             return
         }
 
@@ -371,7 +385,7 @@ final class VoiceSession {
         }
 
         let pending = pendingCommit
-        let cfg = config
+        let cfg = polishConfigSnapshot ?? config
         let ctxApp = targetAppName
 
         polishTask = Task { @MainActor in

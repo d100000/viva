@@ -589,8 +589,13 @@ struct SettingsView: View {
                                             : "该服务商的 API Key",
                                             text: $state.config.polishApiKey)
                                     .textFieldStyle(.roundedBorder)
-                                    .onChange(of: state.config.polishApiKey) { _, _ in
-                                        keyCleared = false
+                                    // ⚠️ 只在**新值非空**时复位。applyProvider 自己会把
+                                    //   polishApiKey 置空，那次赋值同样会触发这个 onChange ——
+                                    //   无条件复位的话，keyCleared 在同一个 runloop turn 里
+                                    //   被立刻打回 false，那条橙色提示一帧都留不住，
+                                    //   用户只会看到 Key 凭空消失、测试连接和拉取模型双双置灰。
+                                    .onChange(of: state.config.polishApiKey) { _, new in
+                                        if !new.isEmpty { keyCleared = false }
                                     }
                             }
                             if keyCleared {

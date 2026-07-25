@@ -483,10 +483,14 @@ private struct PolishToggle: View {
 
     @State private var showSetup = false
 
-    private var on: Bool { state.config.enablePolish }
-    /// 读 appliedConfig 而不是草稿：这个胶囊要回答的是「下一句真的会被润色吗」，
-    /// 而真正干活的 VoiceSession 拿的是 appliedConfig。设置页里改了模型但没保存时，
-    /// 读草稿会显示「已配好」，用户说完却收到「未配置」。
+    /// ⚠️ on 和 ready 必须同源，都读 appliedConfig。
+    ///   这个胶囊要回答的是「下一句真的会被润色吗」，而真正干活的 VoiceSession
+    ///   拿的是 appliedConfig。只把 ready 改过来会渲染出自相矛盾的状态：
+    ///   设置页勾了润色但没保存时，on=true 显示紫色「已开启」，ready=false 同时
+    ///   挂出橙色感叹号说「未配置模型」—— 而模型明明配好了，缺的只是保存。
+    ///   反向更糟：applied 开着、草稿取消勾选未保存时胶囊显示「关闭」，
+    ///   下一句却仍会被送去第三方润色。
+    private var on: Bool { state.appliedConfig.enablePolish }
     private var ready: Bool { state.appliedConfig.polishReady }
 
     var body: some View {

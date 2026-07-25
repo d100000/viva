@@ -55,6 +55,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.info("欢迎引导完成")
                 self.state.config.hasSeenWelcome = true
                 self.state.saveConfig()
+                // ⚠️ saveConfig() 现在会把整份草稿标记为「已生效」（appliedConfig = config），
+                //   所以必须紧跟一次 reloadConfig 把它真正推给 capture / hotkey / session。
+                //   少了这一句就会出现「isReady 显示就绪、按热键却报还没配 Key」——
+                //   引导期间用户完全可以从菜单栏打开主界面去设置页改东西而不保存。
+                self.state.onReloadConfig?()
                 self.mainWindow.show()
             }
             welcome.show()
