@@ -363,7 +363,7 @@ private struct ReadinessCard: View {
                 CheckRow(ok: state.hotkeyHealthy, title: "全局热键",
                          detail: state.hotkeyHealthy
                             ? "\(HotkeyManager.describe(state.config)) 已注册并在监控中"
-                            : "未注册 —— 通常是辅助功能权限刚授予但还没重启本应用",
+                            : "未注册。刚授权过就重启本应用；如果是升级/重新编译后失效，需要到「系统设置 → 隐私与安全性 → 辅助功能」里把 Viva 先移除再重新添加（授权绑定代码签名，仅重新勾选无效）",
                          action: nil)
             }
             .padding(6)

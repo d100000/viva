@@ -62,7 +62,10 @@ struct Config: Codable {
     /// true = 剪贴板 + ⌘V（兼容性最好）；false = CGEvent 逐字键入
     var useClipboardPaste: Bool = true
     /// 粘贴后恢复原剪贴板的延迟(ms)。iTerm2 / Warp 这类 bracketed paste 慢消费者需要 1500。
-    var clipboardRestoreDelayMs: Int = 200
+    /// ⚠️ 不要低于 600。恢复太早目标 App 还没读走剪贴板，会粘出旧内容 ——
+    ///    这是不可逆的错误，而恢复晚一点用户几乎无感。
+    ///    Electron 宿主和终端会自动提到 1500。
+    var clipboardRestoreDelayMs: Int = 600
     /// 只把最终整段结果上屏（不逐句）。默认 false = 边说边逐句上屏。
     var commitOnlyAtEnd: Bool = false
 

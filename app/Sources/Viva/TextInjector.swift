@@ -9,13 +9,21 @@ import Carbon.HIToolbox
 /// **只做追加，绝不做退格回改** —— 算错一次就会不可逆地删掉用户自己的文字。
 enum TextInjector {
 
-    /// 已知的「慢消费者」：开了 bracketed paste 的终端，粘贴后要更久才读走剪贴板
-    private static let slowPasteApps: Set<String> = [
-        "com.googlecode.iterm2",
-        "dev.warp.Warp-Stable",
-        "com.mitchellh.ghostty",
-        "com.apple.Terminal",
+    /// 已知的「慢消费者」——读剪贴板慢的宿主。
+    ///
+    /// ⚠️ 用**前缀/关键字**匹配而不是精确 bundle id：Electron 系（VS Code / Slack /
+    ///    飞书 / Notion / Obsidian / Cursor）同样以读剪贴板慢出名，精确名单永远漏。
+    ///    恢复晚一点用户几乎无感，粘错内容却是不可逆的 —— 宁可保守。
+    private static let slowPasteHints: [String] = [
+        "iterm", "warp", "ghostty", "terminal", "alacritty", "kitty",
+        "vscode", "code", "cursor", "slack", "lark", "feishu",
+        "notion", "obsidian", "discord", "electron",
     ]
+
+    private static func isSlowConsumer(_ bundleId: String?) -> Bool {
+        guard let b = bundleId?.lowercased() else { return false }
+        return slowPasteHints.contains { b.contains($0) }
+    }
 
     /// Secure Event Input 开启时（密码框、iTerm2 的 Secure Keyboard Entry、1Password 前台），
     /// CGEventTap 与合成按键**全部失效且没有任何错误返回**。必须主动检测。
@@ -94,9 +102,9 @@ enum TextInjector {
         postCommandV()
 
         // 4. 延迟恢复。恢复太早目标 App 还没读走，会粘出旧内容。
-        var delayMs = config.clipboardRestoreDelayMs
-        if let bid = frontmostBundleId, slowPasteApps.contains(bid) {
-            delayMs = max(delayMs, 1500)      // typeflux 实测：慢终端要 1.5s
+        var delayMs = max(config.clipboardRestoreDelayMs, 600)   // 200ms 太赌了
+        if isSlowConsumer(frontmostBundleId) {
+            delayMs = max(delayMs, 1500)      // typeflux 实测：慢消费者要 1.5s
         }
 
         // 每次上屏都把恢复时间往后推，整段说完后才真正恢复一次

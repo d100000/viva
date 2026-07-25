@@ -52,6 +52,9 @@ final class VoiceSession {
     /// 录音时润色关（已逐句上屏）→ 收尾时润色开 → 再 inject 一遍全文（重复）；
     /// 或录音时润色开（内容全囤着）→ 收尾时润色关 → 谁都不 inject（整段丢失）。
     private var deferCommitSnapshot = false
+    /// 本次会话是否有任何一次上屏走了降级路径（Secure Input / 缺权限 / 前台切走）。
+    /// 历史记录里的「仅复制」角标要靠它才准。
+    private var didFallbackToClipboard = false
 
     init(config: Config, capture: AudioCapture, hud: HUDController) {
         self.config = config
@@ -94,7 +97,14 @@ final class VoiceSession {
     // MARK: - 开始
 
     func begin(testMode: Bool = false) {
-        guard state == .idle else { return }
+        // 静默返回是最糟的处理：用户按住热键说了一整段，屏幕上什么都没发生，
+        // 说完的话直接蒸发。.finalizing 最长 6 秒、.polishing 最长 5 秒，
+        // 这段窗口真实存在，必须告诉用户「在忙，稍候」。
+        guard state == .idle else {
+            hud.flash(message: state == .polishing ? "正在润色上一段，稍候" : "正在收尾上一段，稍候",
+                      duration: 1.2)
+            return
+        }
         self.testMode = testMode
 
         guard config.hasCredentials else {
@@ -117,6 +127,7 @@ final class VoiceSession {
         committedText = ""
         pendingCommit = ""
         injectedCharCount = 0
+        didFallbackToClipboard = false
         billedSeconds = 0
 
         app.lastError = ""
@@ -189,7 +200,13 @@ final class VoiceSession {
         hud.hideNow()
         app.isPolishing = false
         finishState()
-        hud.flash(message: "已取消", duration: 0.85)
+        // 逐句上屏模式下，已经写进目标 App 的文字是**不会**被撤回的
+        //（TextInjector 明确只做追加，退格回改是破坏性操作）。
+        // 所以提示必须说实话，否则用户以为撤销了，实际文档里还留着半句。
+        hud.flash(message: injectedCharCount > 0
+                  ? "已停止 —— 已输入的 \(injectedCharCount) 字保留在原处"
+                  : "已取消",
+                  duration: injectedCharCount > 0 ? 2.0 : 0.85)
     }
 
     private func finishState() {
@@ -235,6 +252,9 @@ final class VoiceSession {
         //    （VAD 强制收流 / 最大时长 / asyncFinal），此时若不停，
         //    isCapturing 会永久为 true，preRoll 再也不会被填充 ——
         //    「不吃掉你的前三个字」这个核心卖点会在本次进程剩余生命周期里失效。
+        // 服务端可能在用户还在说话时就结束流（VAD 强制收流 / 最大时长 / asyncFinal）。
+        // 这时后半段会静默蒸发 —— 竞品「系统自动吞掉我一部分话」就是这个。
+        let interrupted = state == .listening
         if capture.isCapturing { _ = capture.stopCapturing() }
 
         // 还没定稿但已经识别出来的尾巴也要算上，否则用户会丢字
@@ -253,6 +273,11 @@ final class VoiceSession {
         asr = nil
         app.committed = committedText
         app.partial = ""
+
+        if interrupted, !testMode {
+            Log.warn("服务端在录音中途结束了本次识别")
+            hud.flash(message: "本次识别被服务端结束了，请松开热键重新说", isError: true, duration: 2.6)
+        }
 
         let raw = committedText
         guard !raw.isEmpty else {
@@ -347,7 +372,7 @@ final class VoiceSession {
                 firstCharMs: app.firstCharMs,
                 appBundleId: testMode ? nil : targetBundleId,
                 appName: testMode ? "（试听）" : targetAppName,
-                injected: !testMode,
+                injected: !testMode && !didFallbackToClipboard,
                 polishedText: polished))
         }
         finishState()
@@ -366,10 +391,24 @@ final class VoiceSession {
         app.isPolishing = false
         finishState()
 
+        // ⚠️ 必须落历史。原来只往剪贴板放一份 —— 用户随手复制点别的，
+        //    这段话就永久没了。竞品「网络不好说完一整段什么都没上屏」正是这个坑。
+        if !committedText.isEmpty {
+            HistoryStore.shared.add(VoiceRecord(
+                text: committedText,
+                startedAt: startedAt ?? Date(),
+                durationSec: billedSeconds,
+                firstCharMs: app.firstCharMs,
+                appBundleId: testMode ? nil : targetBundleId,
+                appName: testMode ? "（试听）" : targetAppName,
+                injected: false))
+        }
+
         if testMode { return }
         if !committedText.isEmpty {
             TextInjector.copyToClipboard(committedText, transient: false)
-            hud.flash(message: "\(msg)（已识别内容已复制，⌘V 可粘贴）", isError: true, duration: 4)
+            hud.flash(message: "\(msg)（已识别的内容已存进历史并复制到剪贴板）",
+                      isError: true, duration: 4)
         } else {
             hud.flash(message: msg, isError: true, duration: 4)
         }
@@ -385,6 +424,7 @@ final class VoiceSession {
            target != now {
             Log.warn("前台 App 已从 \(target) 切到 \(now)，改为复制到剪贴板")
             TextInjector.copyToClipboard(text, transient: false)
+            didFallbackToClipboard = true
             hud.flash(message: "前台应用已切换，文本已复制到剪贴板", isError: true, duration: 3)
             return
         }
@@ -393,6 +433,7 @@ final class VoiceSession {
         case .injected:
             injectedCharCount += text.count
         case .copiedOnly(let reason):
+            didFallbackToClipboard = true
             hud.flash(message: "\(reason)，已复制到剪贴板，请按 ⌘V", isError: true, duration: 3.5)
         }
     }

@@ -180,8 +180,13 @@ final class HotkeyManager {
             return nil                                // 吞掉，别让主键输入到目标 App
 
         case .keyUp:
-            guard code == keyCode else { return Unmanaged.passUnretained(event) }
-            if isDown { fireRelease() }
+            // ⚠️ 只吞「与我们自己那次 keyDown 配对」的抬起。
+            //    原来只比对 keyCode 就无条件 return nil，等于把别人的按键也吃掉 ——
+            //    微信输入法劫持 Fn 被骂惨就是这个问题（别的 App 快捷键集体失灵）。
+            //    isDown 只在 firePress 里置位，而 firePress 只在 keyCode 与修饰键
+            //    都匹配时才调用，正好是精确的配对凭据。
+            guard code == keyCode, isDown else { return Unmanaged.passUnretained(event) }
+            fireRelease()
             return nil
 
         case .flagsChanged:

@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreAudio
 
 /// 麦克风采集：设备原生格式 → 16kHz / 16bit / 单声道 PCM，按 200ms 分包。
 ///
@@ -63,8 +64,49 @@ final class AudioCapture {
 
     // MARK: - 引擎
 
+    /// 当前默认输入设备是不是蓝牙。
+    ///
+    /// ⚠️ 这个判断决定了要不要常驻预热，而它关系到一个**比竞品更严重**的问题：
+    /// 打开输入设备会把 AirPods 从 A2DP（高音质单向）拉到 HFP/SCO（双向通话），
+    /// 于是音乐变成打电话音质、双击切歌变成挂断提示音、音量曲线突变。
+    /// 竞品是「触发过一次录音才降级」，而我们如果无脑常驻预热，
+    /// 就是「App 一启动就降级、直到退出」—— 更糟。
+    ///
+    /// 所以：蓝牙设备下放弃常驻预热，改成按下热键才启动。
+    /// 首字的损失由 preRoll 之外的即时启动补偿（蓝牙本来就有 SCO 建链延迟，
+    /// 常驻预热在这类设备上收益也有限）。
+    static var defaultInputIsBluetooth: Bool {
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                         &addr, 0, nil, &size, &deviceID) == noErr,
+              deviceID != 0 else { return false }
+
+        var transport = UInt32(0)
+        var tsize = UInt32(MemoryLayout<UInt32>.size)
+        var taddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(deviceID, &taddr, 0, nil, &tsize, &transport) == noErr
+        else { return false }
+
+        return transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
     /// App 启动时调用一次。引擎从此常驻，`isCapturing` 只控制数据往不往外送。
-    func prewarm() throws {
+    ///
+    /// - Parameter force: 忽略蓝牙判断强行预热（热键按下时用）
+    func prewarm(force: Bool = false) throws {
+        if !force, Self.defaultInputIsBluetooth {
+            Log.info("默认输入是蓝牙设备，跳过常驻预热 —— 避免把耳机永久拉进 HFP 通话模式（音乐会变成打电话音质）")
+            return
+        }
         guard !isRunning else { return }
 
         let input = engine.inputNode
@@ -103,16 +145,31 @@ final class AudioCapture {
         isRunning = true
     }
 
+    private var rebuildRetries = 0
+
     private func rebuild() {
         stopEngine(keepObserver: true)
         do {
-            try prewarm()
+            // 设备刚切换时 CoreAudio 常常还没稳定（采样率会短暂返回 0），
+            // 立刻重建大概率失败 —— 失败要能重试，否则一次抖动就永久失效，
+            // 而且报给用户的原因还是错的（竞品那条「其他应用正在录音」就是这么来的）。
+            try prewarm(force: true)
+            rebuildRetries = 0
         } catch {
             // 重建失败不能静默 —— 用户会遇到「麦克风突然不工作了」而毫无线索
             Log.error("重建采集失败：\(error.localizedDescription)")
-            Task { @MainActor in
-                AppState.shared.audioEngineReady = false
-                AppState.shared.lastError = "音频设备变化后重建失败：\(error.localizedDescription)"
+            if rebuildRetries < 3 {
+                rebuildRetries += 1
+                let delay = Double(rebuildRetries) * 0.6
+                Log.info("\(delay)s 后重试第 \(rebuildRetries) 次")
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.rebuild()
+                }
+            } else {
+                Task { @MainActor in
+                    AppState.shared.audioEngineReady = false
+                    AppState.shared.lastError = "音频设备变化后重建失败（已重试 3 次）：\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -149,6 +206,12 @@ final class AudioCapture {
 
     /// 开始录音。返回预缓冲里攒下的音频（热键按下之前的那 400ms），应当作为第一批发出去。
     func startCapturing() -> Data {
+        // 蓝牙路径下引擎是不常驻的，按下热键才启动。
+        // 代价是没有 preRoll，但换来的是耳机不会被长期拉进通话模式。
+        if !isRunning {
+            do { try prewarm(force: true) }
+            catch { Log.error("即时启动采集失败：\(error.localizedDescription)") }
+        }
         lock.lock(); defer { lock.unlock() }
         isCapturing = true
         let head = preRoll

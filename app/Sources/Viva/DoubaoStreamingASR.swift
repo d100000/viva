@@ -21,6 +21,11 @@ final class DoubaoStreamingASR: NSObject {
 
     private(set) var state: State = .idle
     private(set) var logId: String = ""
+    /// WebSocket 是否真的握手成功过。
+    /// ⚠️ 本地代理（Clash / AdGuard）会拦掉 WSS 的 Upgrade 握手，此时 state 停在
+    ///    .connecting，用户松手后照样发末包、6 秒后兜底定时器拿着空 partial 收尾，
+    ///    最终提示「没听清，再说一次」—— 用户永远查不出是代理的问题。
+    private var didConnect = false
 
     /// 已提交的 definite 分句数，用作游标（result_type = full 时避免重复上屏）
     private var committedUtteranceCount = 0
@@ -103,6 +108,11 @@ final class DoubaoStreamingASR: NSObject {
         // openless 用 12s，这里给 6s —— 语音输入场景等太久用户会以为卡死
         finalTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
             guard let self, !self.didFinish else { return }
+            // 从没连上过 → 不是「没听清」，是网络/代理问题，必须如实报
+            guard self.didConnect else {
+                self.fail("连接始终没有建立。本地代理（Clash / AdGuard 等）或 DNS 可能拦截了 WebSocket 握手，试试关闭代理或把 openspeech.bytedance.com 加入直连")
+                return
+            }
             Log.warn("等最终结果超时，用已有 partial 兜底")
             self.finishUp(self.lastPartial)
         }
@@ -171,7 +181,22 @@ final class DoubaoStreamingASR: NSObject {
                 if self.didSendLastPacket {
                     if !self.didFinish { self.finishUp(self.lastPartial) }
                 } else if self.state != .closed {
-                    self.fail("连接中断：\(err.localizedDescription)")
+                    // 按错误类型给可自查的提示，而不是笼统一句「连接中断」
+                    let hint: String
+                    if let u = err as? URLError {
+                        switch u.code {
+                        case .cannotFindHost, .dnsLookupFailed:
+                            hint = "（DNS 解析失败，可能被本地代理或 DNS 工具改写）"
+                        case .secureConnectionFailed, .serverCertificateUntrusted:
+                            hint = "（TLS 握手失败，可能有中间人代理）"
+                        case .notConnectedToInternet, .networkConnectionLost:
+                            hint = "（网络已断开）"
+                        case .timedOut:
+                            hint = "（超时，检查代理设置）"
+                        default: hint = ""
+                        }
+                    } else { hint = "" }
+                    self.fail("连接中断：\(err.localizedDescription)\(hint)")
                 }
             case .success(let msg):
                 switch msg {
@@ -186,6 +211,7 @@ final class DoubaoStreamingASR: NSObject {
 
     private func handle(_ raw: Data) {
         if state == .connecting { state = .streaming }
+        didConnect = true
 
         let msg: Sauc.ServerMessage
         do { msg = try Sauc.parse(raw) }
@@ -296,11 +322,13 @@ extension DoubaoStreamingASR: URLSessionWebSocketDelegate {
                     didOpenWithProtocol proto: String?) {
         // X-Tt-Logid 是排障唯一线索，必须留下来
         if let http = webSocketTask.response as? HTTPURLResponse {
+            didConnect = true
             logId = (http.value(forHTTPHeaderField: "X-Tt-Logid")
                   ?? http.value(forHTTPHeaderField: "x-tt-logid") ?? "")
             Log.info("WebSocket 已连接  logid=\(logId)")
         }
         if state == .connecting { state = .streaming }
+        didConnect = true
     }
 
     func urlSession(_ session: URLSession,
