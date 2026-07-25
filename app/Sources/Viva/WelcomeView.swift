@@ -95,7 +95,8 @@ struct WelcomeView: View {
 
                     StepCard(index: 1, done: state.config.hasCredentials,
                              title: "填入火山引擎 API Key",
-                             detail: "需要先在控制台开通「豆包流式语音识别模型 2.0」。约 1 元/小时，按你实际说话时长计费。") {
+                             detail: "需要先在控制台开通「豆包流式语音识别模型 2.0」。约 1 元/小时，按你实际说话时长计费。",
+                             editable: true) {
                         VStack(alignment: .leading, spacing: 7) {
                             HStack {
                                 SecureField("控制台的 x-api-key", text: $keyDraft)
@@ -227,6 +228,8 @@ private struct StepCard<Trailing: View>: View {
     let done: Bool
     let title: String
     let detail: String
+    /// 完成之后是否仍允许修改（Key 这类「填了不等于填对」的步骤要允许）
+    var editable: Bool = false
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
@@ -254,7 +257,15 @@ private struct StepCard<Trailing: View>: View {
                 Text(detail)
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if !done { trailing }
+                // ⚠️ 完成后也要保留输入控件。done 的判据只是「非空」而不是「有效」，
+                //   粘错/被截断的 Key 一样算完成 —— 藏起来用户就再也改不了了，
+                //   而「试一句」此时恰好会出现并报鉴权失败，形成死路。
+                if !done {
+                    trailing
+                } else if editable {
+                    DisclosureGroup("修改") { trailing.padding(.top, 4) }
+                        .font(.caption)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -269,9 +280,17 @@ private struct StepCard<Trailing: View>: View {
 // MARK: - 窗口容器
 
 @MainActor
-final class WelcomeWindowController {
+final class WelcomeWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     var onFinish: (() -> Void)?
+
+    /// ⚠️ 点红色关闭按钮也必须走 onFinish。否则 hasSeenWelcome 永远不会被置位，
+    ///   引导页每次启动都重复弹，「跳过」形同虚设；而且主界面也不会打开，
+    ///   屏幕上一个窗口都不剩 —— 正是「装了但没打开」那个坑。
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onFinish?()
+        return true
+    }
 
     func show() {
         if let w = window {
@@ -285,6 +304,7 @@ final class WelcomeWindowController {
         w.titleVisibility = .hidden
         w.center()
         w.isReleasedWhenClosed = false
+        w.delegate = self
         w.contentView = NSHostingView(rootView: WelcomeView { [weak self] in
             self?.close()
             self?.onFinish?()

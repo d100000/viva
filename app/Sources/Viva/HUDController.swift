@@ -122,9 +122,21 @@ final class HUDController {
 
     // MARK: - 显示与定位
 
+    /// 淡出动画进行中的标记。present() 必须能打断它 —— 否则连续口述时，
+    /// 上一句的淡出 completionHandler 会把新会话刚建立的悬浮条 orderOut + reset，
+    /// 表现为浮条「闪一下没了又冒出来」，新句子的前几百毫秒毫无反馈。
+    private var fadingOut = false
+
     private func present() {
         let p = ensurePanel()
         layout()
+        fadingOut = false
+        if p.isVisible, p.alphaValue < 1 {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.08
+                p.animator().alphaValue = 1
+            }
+        }
         if !p.isVisible {
             p.alphaValue = 0
             p.orderFrontRegardless()
@@ -160,13 +172,18 @@ final class HUDController {
         hideWork?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self, let p = self.panel else { return }
+            self.fadingOut = true
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 p.animator().alphaValue = 0
             } completionHandler: { [weak self] in
+                // 期间可能已经开了新会话（present 会把 fadingOut 置回 false），
+                // 这时绝不能把新会话的浮条收走
+                guard let self, self.fadingOut else { return }
+                self.fadingOut = false
                 p.orderOut(nil)
-                self?.model.reset()
+                self.model.reset()
             }
         }
         hideWork = item
@@ -245,6 +262,11 @@ struct HUDRoot: View {
                     .frame(width: 34, height: 15)
             }
         }
+        // ⚠️ 这里必须给出宽度上限。根节点原来是无约束的 .fixedSize()，
+        //    SwiftUI 会按「单行 ideal 宽度」排版（长句能到 2000pt+），
+        //    而面板最多 620pt —— 超出部分连同圆角一起被窗口裁掉，
+        //    用户看到一条右端被削平的黑条，且 lineLimit(3) 永远不会生效。
+        .frame(maxWidth: 560, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background {
@@ -258,7 +280,7 @@ struct HUDRoot: View {
             }
             .shadow(color: .black.opacity(0.34), radius: 12, y: 4)
         }
-        .fixedSize()
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// 左侧状态点。识别中脉动，收尾/润色换成对应指示。

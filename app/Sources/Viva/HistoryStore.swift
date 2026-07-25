@@ -225,7 +225,8 @@ final class HistoryStore: ObservableObject {
         let cal = Calendar.current
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         let filtered = q.isEmpty ? records
-            : records.filter { $0.text.lowercased().contains(q) }
+            : records.filter { $0.finalText.lowercased().contains(q)
+                               || $0.text.lowercased().contains(q) }
         var m: [Date: [VoiceRecord]] = [:]
         for r in filtered { m[cal.startOfDay(for: r.startedAt), default: []].append(r) }
         return m.keys.sorted(by: >).map { (day: $0, items: m[$0]!.sorted { $0.startedAt > $1.startedAt }) }
@@ -244,7 +245,10 @@ final class HistoryStore: ObservableObject {
                 out += "- **\(df.string(from: r.startedAt))**"
                 if let a = r.appName { out += " · \(a)" }
                 out += String(format: " · %.1fs · %d 字\n", r.durationSec, r.charCount)
-                out += "  \n  \(r.text)\n\n"
+                out += "  \n  \(r.finalText)\n\n"
+                if let p = r.polishedText, p != r.text {
+                    out += "  <sub>原文：\(r.text)</sub>\n\n"
+                }
             }
         }
         return out
@@ -254,7 +258,10 @@ final class HistoryStore: ObservableObject {
         var out = "时间,App,时长秒,字数,首字毫秒,文本\n"
         let df = ISO8601DateFormatter()
         for r in records.sorted(by: { $0.startedAt < $1.startedAt }) {
-            let text = "\"" + r.text.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            func csv(_ v: String) -> String {
+                "\"" + v.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            }
+            let text = csv(r.finalText) + "," + csv(r.polishedText == nil ? "" : r.text)
             out += "\(df.string(from: r.startedAt)),\(r.appName ?? ""),"
             out += String(format: "%.2f,%d,%@,", r.durationSec, r.charCount,
                           r.firstCharMs.map(String.init) ?? "")

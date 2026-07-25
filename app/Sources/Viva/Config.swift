@@ -177,20 +177,24 @@ struct Config: Codable {
     static func migrateLegacyIfNeeded() {
         let fm = FileManager.default
         guard !fm.fileExists(atPath: configURL.path) else { return }
-        guard let from = legacyDirs.first(where: {
-            fm.fileExists(atPath: $0.appendingPathComponent("config.json").path)
-        }) else { return }
-
+        // ⚠️ 两个文件要**各自独立**地找来源。原来只按 config.json 挑一个目录，
+        //    如果用户在某一代只写过配置没攒下记录（或反过来），
+        //    另一代目录里的 history.json 就被永久丢弃了 —— 全部统计静默归零。
+        var migrated: [String] = []
         try? fm.createDirectory(at: configDir, withIntermediateDirectories: true)
         for name in ["config.json", "history.json"] {
-            let src = from.appendingPathComponent(name)
             let dst = configDir.appendingPathComponent(name)
-            if fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) {
-                try? fm.copyItem(at: src, to: dst)
+            guard !fm.fileExists(atPath: dst.path) else { continue }
+            guard let src = legacyDirs
+                .map({ $0.appendingPathComponent(name) })
+                .first(where: { fm.fileExists(atPath: $0.path) }) else { continue }
+            if (try? fm.copyItem(at: src, to: dst)) != nil {
+                migrated.append("\(src.deletingLastPathComponent().lastPathComponent)/\(name)")
             }
         }
+        guard !migrated.isEmpty else { return }
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
-        Log.info("已从 \(from.lastPathComponent) 迁移配置与历史")
+        Log.info("已迁移：\(migrated.joined(separator: ", "))")
 
         // ⚠️ 迁移完必须清掉旧目录。本项目连续改过 4 次名，如果每次都「复制不删除」，
         //   用户的 API Key 就会留下 4 份散落的副本 —— 凭证副本越多风险越大。

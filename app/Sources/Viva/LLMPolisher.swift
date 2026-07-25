@@ -17,7 +17,7 @@ final class LLMPolisher {
     }
 
     enum PolishError: LocalizedError {
-        case notConfigured, timeout, empty
+        case notConfigured, timeout, empty, unsafeResult
         case badResponse(String)
 
         var errorDescription: String? {
@@ -26,6 +26,7 @@ final class LLMPolisher {
             case .badResponse(let s): return "润色服务返回异常：\(s)"
             case .timeout: return "润色超时"
             case .empty: return "润色返回了空内容"
+            case .unsafeResult: return "润色结果与原文差异过大，已按原文上屏"
             }
         }
     }
@@ -54,11 +55,11 @@ final class LLMPolisher {
 
     init(config: Config) { self.config = config }
 
-    var isConfigured: Bool {
-        config.enablePolish && !config.polishModel.isEmpty && !config.polishBaseURL.isEmpty
-            // Ollama 本地不校验鉴权，允许 Key 为空
-            && (!config.polishApiKey.isEmpty || config.apiFormat == .ollamaNative)
-    }
+    /// ⚠️ 必须与 Config.polishReady 完全一致。两边判据不同的话，
+    ///    VoiceSession 会因为 polishReady==true 而推迟上屏、进入 .polishing，
+    ///    然后 polish() 又因为 isConfigured==false 抛「未配置」——
+    ///    用户每说一句都白等一次再收到一条红色报错。
+    var isConfigured: Bool { config.polishReady }
 
     // MARK: -
 
@@ -77,6 +78,7 @@ final class LLMPolisher {
         if !path.hasPrefix("/") { path = "/" + path }
         // Gemini 把模型名拼在路径里
         path = path.replacingOccurrences(of: "{model}", with: config.polishModel)
+        if config.polishStream { path = format.streamPath(from: path) }
         guard let url = URL(string: base + path) else {
             throw PolishError.badResponse("baseURL 或端点路径非法：\(base + path)")
         }
@@ -116,6 +118,9 @@ final class LLMPolisher {
             req.setValue(v, forHTTPHeaderField: k)
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: format.body(opts))
+        // ⚠️ timeoutInterval 的语义是「两次收到数据之间的空闲上限」，不是请求总时长。
+        //    SSE 每收到一个 token、甚至一行 ": ping" 保活注释都会重置它，
+        //    所以流式下它对总耗时**没有任何约束**。总时长由 streamed() 自己卡。
         req.timeoutInterval = Double(config.polishTimeoutMs) / 1000.0
 
         let t0 = Date()
@@ -131,6 +136,14 @@ final class LLMPolisher {
             }
         }
         guard !out.isEmpty else { throw PolishError.empty }
+
+        // ⭐ 接上安全护栏。模型跑偏（扩写成一段、输出解释文字、翻成英文）或被
+        //    max_tokens 截断时，结果会被一次性粘进用户正在写的文档 —— 而 deferCommit
+        //    模式下原文根本没上屏，用户没有对照也没有撤销点。
+        guard Self.isSaneResult(original: trimmed, polished: out) else {
+            Log.warn("润色结果未通过护栏（原文 \(trimmed.count) 字 → 返回 \(out.count) 字），按原文处理")
+            throw PolishError.unsafeResult
+        }
 
         let leaked = !thinking.isEmpty
         if leaked, config.polishDisableThinking {
@@ -177,8 +190,16 @@ final class LLMPolisher {
             throw PolishError.badResponse("HTTP \(http.statusCode) \(raw)")
         }
 
+        // 流式必须自己卡总时长，否则服务端慢速吐字能让 .polishing 无限期挂住，
+        // 而 begin() 的 guard state == .idle 会让热键彻底失灵、且没有任何提示。
+        let deadline = Date().addingTimeInterval(Double(config.polishTimeoutMs) / 1000.0)
+
         var text = "", thinking = ""
         for try await line in bytes.lines {
+            if Date() > deadline {
+                Log.warn("润色流式超时（已收 \(text.count) 字），按已收内容返回")
+                break
+            }
             var payload = line
             if format.streamIsSSE {
                 guard line.hasPrefix("data:") else { continue }
@@ -201,7 +222,7 @@ final class LLMPolisher {
             }
             if (obj["done"] as? Bool) == true { break }      // Ollama 的结束标记
         }
-        guard !text.isEmpty else { throw PolishError.empty }
+        guard !text.isEmpty else { throw PolishError.timeout }
         return (text, thinking)
     }
 

@@ -104,12 +104,24 @@ final class AudioCapture {
     }
 
     private func rebuild() {
-        stopEngine()
-        do { try prewarm() } catch { Log.error("重建采集失败：\(error.localizedDescription)") }
+        stopEngine(keepObserver: true)
+        do {
+            try prewarm()
+        } catch {
+            // 重建失败不能静默 —— 用户会遇到「麦克风突然不工作了」而毫无线索
+            Log.error("重建采集失败：\(error.localizedDescription)")
+            Task { @MainActor in
+                AppState.shared.audioEngineReady = false
+                AppState.shared.lastError = "音频设备变化后重建失败：\(error.localizedDescription)"
+            }
+        }
     }
 
-    func stopEngine() {
-        if let ob = configObserver {
+    /// - Parameter keepObserver: 重建流程要保留观察者。
+    ///   ⚠️ 否则 prewarm() 在拿不到设备格式时提前抛错（此时还没走到重新注册那步），
+    ///   观察者就永久没了 —— 设备再变化也不会重建，麦克风永久失效只能重启 App。
+    func stopEngine(keepObserver: Bool = false) {
+        if !keepObserver, let ob = configObserver {
             NotificationCenter.default.removeObserver(ob)
             configObserver = nil
         }

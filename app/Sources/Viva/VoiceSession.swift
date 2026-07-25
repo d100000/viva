@@ -28,6 +28,12 @@ final class VoiceSession {
     private var firstCharAt: Date?
     /// 试听模式：结果只显示在主界面，不写进任何 App（因此不需要辅助功能权限）
     private var testMode = false
+    /// 润色请求。**必须被持有** —— abort() 要能取消它。
+    /// 否则用户按 Esc 取消后，1~2 秒后润色返回仍会把文字粘进光标处；
+    /// 更糟的是它返回时的 finishState() 会把「下一次录音」的 state 打回 .idle，
+    /// 导致新会话的音频不再上送（capture.onChunk 有 state == .listening 的守卫），
+    /// 表现为「说了半天一个字都没出来」。
+    private var polishTask: Task<Void, Never>?
 
     private(set) var billedSeconds: Double = 0
 
@@ -39,9 +45,13 @@ final class VoiceSession {
     /// 而逐句上屏意味着文字已经写进去了，之后再改就得退格删用户屏幕上的东西。
     /// 所以：润色开 = 说话时只在悬浮窗显示，润色完一次性粘贴；
     ///       润色关 = 逐句上屏，真正的边说边写。
-    private var deferCommit: Bool {
-        testMode || config.commitOnlyAtEnd || config.polishReady
-    }
+    private var deferCommit: Bool { deferCommitSnapshot }
+
+    /// ⚠️ 必须在 begin() 时快照。它原本是计算属性，而 reloadConfig 可以在
+    /// .listening/.finalizing 期间把新配置推进来 —— 中途变值会导致：
+    /// 录音时润色关（已逐句上屏）→ 收尾时润色开 → 再 inject 一遍全文（重复）；
+    /// 或录音时润色开（内容全囤着）→ 收尾时润色关 → 谁都不 inject（整段丢失）。
+    private var deferCommitSnapshot = false
 
     init(config: Config, capture: AudioCapture, hud: HUDController) {
         self.config = config
@@ -98,6 +108,7 @@ final class VoiceSession {
             return
         }
 
+        deferCommitSnapshot = testMode || config.commitOnlyAtEnd || config.polishReady
         targetBundleId = TextInjector.frontmostBundleId
         targetAppName = NSWorkspace.shared.frontmostApplication?.localizedName
         startedAt = Date()
@@ -169,6 +180,8 @@ final class VoiceSession {
         _ = capture.stopCapturing()
         asr?.cancel()
         asr = nil
+        polishTask?.cancel()
+        polishTask = nil
         // 必须清空：否则「松手才上屏 / 润色」模式下 pendingCommit 还留着，
         // 后续任何路径调到 inject(pendingCommit) 都会把用户已取消的内容粘出去
         pendingCommit = ""
@@ -218,6 +231,12 @@ final class VoiceSession {
     // MARK: - 收尾
 
     private func handleFinished(_ trailing: String) {
+        // ⚠️ 必须停采集。服务端可能在 state 还是 .listening 时就结束流
+        //    （VAD 强制收流 / 最大时长 / asyncFinal），此时若不停，
+        //    isCapturing 会永久为 true，preRoll 再也不会被填充 ——
+        //    「不吃掉你的前三个字」这个核心卖点会在本次进程剩余生命周期里失效。
+        if capture.isCapturing { _ = capture.stopCapturing() }
+
         // 还没定稿但已经识别出来的尾巴也要算上，否则用户会丢字
         let tail = trailing.trimmingCharacters(in: .whitespacesAndNewlines)
         if !tail.isEmpty {
@@ -263,20 +282,27 @@ final class VoiceSession {
         let cfg = config
         let ctxApp = targetAppName
 
-        Task { @MainActor in
+        polishTask = Task { @MainActor in
             do {
                 let polisher = LLMPolisher(config: cfg)
                 // 流式增量只喂悬浮条做视觉反馈。
                 // ⚠️ 上屏必须等全文完成 —— 把润色到一半的文本粘进输入框比不润色更糟。
                 polisher.onDelta = { [weak self] partial in
-                    guard let self, !partial.isEmpty else { return }
+                    guard let self, !partial.isEmpty,
+                          self.state == .polishing, !Task.isCancelled else { return }
                     self.app.committed = partial
                     if !self.testMode { self.hud.update(committed: partial, partial: "") }
                 }
                 let r = try await polisher.polish(raw, contextApp: ctxApp)
+                // 用户可能在这 1~2 秒里按了 Esc。此时绝不能上屏，
+                // 更不能走 finishState —— 那会把新一轮录音打回 .idle。
+                guard !Task.isCancelled, self.state == .polishing else { return }
                 Log.info("润色完成 \(r.elapsedMs)ms：\(raw.count) 字 → \(r.text.count) 字")
                 self.applyPolish(raw: raw, polished: r.text, elapsedMs: r.elapsedMs)
             } catch {
+                // ⚠️ 这道 guard 不是冗余：Task.cancel() 会让 URLSession 抛错落到这里，
+                //    不判取消的话会走「退回原文上屏」，bug 一模一样地复现。
+                guard !Task.isCancelled, self.state == .polishing else { return }
                 Log.warn("润色失败：\(error.localizedDescription)")
                 self.app.polishNote = "润色失败，已使用原文"
                 // 失败绝不能丢内容 —— 退回原文照常上屏
@@ -293,6 +319,7 @@ final class VoiceSession {
 
     /// 润色成功 → 一次性上屏
     private func applyPolish(raw: String, polished: String, elapsedMs: Int) {
+        guard state == .polishing else { return }      // 兜底：已取消就不做任何事
         pendingCommit = ""
         app.polishNote = raw == polished ? "润色无改动（\(elapsedMs)ms）" : "已润色（\(elapsedMs)ms）"
         app.committed = polished
@@ -310,6 +337,7 @@ final class VoiceSession {
 
     /// 落历史 + 复位状态
     private func finalize(raw: String, polished: String?) {
+        polishTask = nil
         app.isPolishing = false
         if !raw.isEmpty {
             HistoryStore.shared.add(VoiceRecord(
