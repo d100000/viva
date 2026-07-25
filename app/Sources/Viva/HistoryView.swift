@@ -140,7 +140,7 @@ struct RecordRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(record.text)
+                Text(record.finalText)
                     .font(.system(size: compact ? 13 : 14))
                     .lineSpacing(2)
                     .lineLimit(compact ? 2 : nil)
@@ -161,6 +161,9 @@ struct RecordRow: View {
                         Label("仅复制", systemImage: "doc.on.clipboard")
                             .foregroundStyle(.orange)
                     }
+                    if record.polishedText != nil {
+                        Label("已润色", systemImage: "sparkles").foregroundStyle(.purple)
+                    }
                 }
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
@@ -169,7 +172,7 @@ struct RecordRow: View {
             if hovering || copied {
                 HStack(spacing: 4) {
                     Button {
-                        TextInjector.copyToClipboard(record.text, transient: false)
+                        TextInjector.copyToClipboard(record.finalText, transient: false)
                         copied = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
                     } label: {

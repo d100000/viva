@@ -58,6 +58,15 @@ enum APIFormat: String, CaseIterable, Identifiable {
     /// 是否用 SSE（`data:` 前缀）。Ollama 原生是 NDJSON，逐行就是完整 JSON。
     var streamIsSSE: Bool { self != .ollamaNative }
 
+    /// 流式时要用的路径。Gemini 的流式是另一个方法名 + 必须带 alt=sse，
+    /// 用非流式的 :generateContent 走流式解析会一行都读不出来（100% 空内容）。
+    func streamPath(from path: String) -> String {
+        guard self == .geminiGenerate else { return path }
+        if path.contains(":streamGenerateContent") { return path }
+        return path.replacingOccurrences(of: ":generateContent",
+                                         with: ":streamGenerateContent?alt=sse")
+    }
+
     // MARK: - 鉴权
 
     func headers(apiKey: String) -> [String: String] {
@@ -110,7 +119,10 @@ enum APIFormat: String, CaseIterable, Identifiable {
             b["stream"] = o.stream
             b["max_output_tokens"] = o.maxTokens
             if let t = o.temperature { b["temperature"] = t }
-            applyThinkingOff(&b, o.thinkingOff)
+            // ⚠️ Responses API 的关闭推理写法是嵌套的 reasoning.effort，
+            //    不是 Chat Completions 的顶层 reasoning_effort ——
+            //    顶层塞未知字段会被严格校验直接 400。
+            if o.thinkingOff != .none { b["reasoning"] = ["effort": "none"] }
 
         case .anthropicMessages:
             b["model"] = o.model

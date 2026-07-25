@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.accessory)      // 菜单栏 App，不进 Dock
+        installMainMenu()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon(.idle)
@@ -34,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotkey = makeHotkey()
         appliedConfig = state.config
+        state.appliedConfig = state.config
 
         // UI 上的「按住这里说话」与「保存并应用」回调
         state.onTestStart = { [weak self] in self?.session.begin(testMode: true) }
@@ -74,6 +76,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         mainWindow.show()
         return true
+    }
+
+    /// ⚠️ 必须有主菜单，否则自家窗口里的 ⌘V / ⌘C / ⌘A / ⌘Z **全部失效**。
+    ///
+    /// macOS 上文本编辑的剪切/拷贝/粘贴/全选是靠主菜单的 key equivalent 分发的，
+    /// 不在 NSResponder 的默认链路里。LSUIElement + .accessory 的 App 不会自动获得
+    /// 主菜单，于是用户在欢迎页粘贴 40 多位的 API Key 时会发现 ⌘V 没反应 ——
+    /// 这是整条 onboarding 上最容易让人直接放弃的一步，且现象诡异到不会怀疑是 App 的问题。
+    private func installMainMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "关于 Viva", action: nil, keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "隐藏 Viva",
+                        action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "退出 Viva",
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "编辑")
+        edit.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+
+        NSApp.mainMenu = main
     }
 
     // MARK: - 启动流程
@@ -184,6 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // ── 其余配置（热词、识别参数、润色、上屏方式）直接推给现有会话 ──
         session.update(config: new)
+        state.appliedConfig = new       // 让 isReady 反映的是真正生效的配置
 
         buildMenu()
         Log.info("配置已重新加载（热键重建：\(hotkeyChanged ? "是" : "否")）")

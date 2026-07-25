@@ -98,8 +98,23 @@ final class AppState: ObservableObject {
 
     /// ⚠️ 必须含 hotkeyHealthy。原来不含它，导致「启动后才授予辅助功能」时
     ///   UI 显示「就绪 · 按住右⌘说话」，但 CGEventTap 根本没建，按键毫无反应。
+    ///
+    /// ⚠️ 用的是 appliedConfig 而不是 config：设置页的控件直接双向绑定 config，
+    ///   用户敲完 Key 但没点「保存并应用」时 config 已变、而真正干活的
+    ///   VoiceSession 还拿着旧配置。若这里读 config，界面会立刻显示「就绪」，
+    ///   用户按热键却报「还没配置 API Key」—— 状态与行为对不上。
     var isReady: Bool {
-        micGranted && axGranted && config.hasCredentials && audioEngineReady && hotkeyHealthy
+        micGranted && axGranted && appliedConfig.hasCredentials
+            && audioEngineReady && hotkeyHealthy
+    }
+
+    /// 真正生效中的配置（由 AppDelegate 在 reloadConfig 后同步）。
+    /// 与 `config`（UI 编辑中的草稿）区分开。
+    @Published var appliedConfig: Config = Config.load()
+
+    /// UI 上是否有未保存的改动
+    var hasUnsavedChanges: Bool {
+        (try? JSONEncoder().encode(config)) != (try? JSONEncoder().encode(appliedConfig))
     }
 
     /// 本次运行的粗略费用（豆包流式 2.0 后付费 1 元/小时）
