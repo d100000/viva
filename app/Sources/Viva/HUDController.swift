@@ -26,6 +26,20 @@ final class HUDModel: ObservableObject {
     }
 }
 
+/// 悬浮条的窗口。
+///
+/// 存在的唯一理由：**透明窗口的系统阴影在尺寸变化后不会自动重算**。
+/// 悬浮条的宽高是随着识别文字一直在长的（`sizingOptions = .intrinsicContentSize`
+/// 会不停 resize 窗口），不重算就会留下上一个尺寸的阴影轮廓 ——
+/// 屏幕上出现一圈对不上的灰边，比没有阴影更难看。
+private final class HUDPanel: NSPanel {
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        let changed = frameRect.size != frame.size
+        super.setFrame(frameRect, display: flag)
+        if changed { invalidateShadow() }
+    }
+}
+
 /// 悬浮条。
 ///
 /// 两条硬性要求：
@@ -50,12 +64,14 @@ final class HUDController {
         let h = NSHostingView(rootView: root)
         h.sizingOptions = [.intrinsicContentSize]
 
-        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 148, height: 38),
-                        styleMask: [.borderless, .nonactivatingPanel],
-                        backing: .buffered, defer: false)
+        let p = HUDPanel(contentRect: NSRect(x: 0, y: 0, width: 148, height: 38),
+                         styleMask: [.borderless, .nonactivatingPanel],
+                         backing: .buffered, defer: false)
         p.isOpaque = false
         p.backgroundColor = .clear
-        p.hasShadow = false                  // 阴影由 SwiftUI 画，避免方形硬边
+        // ⭐ 阴影必须由系统画。SwiftUI 的 .shadow() 会被窗口矩形裁成一圈直角灰块 ——
+        //   详见 HUDRoot 里那段注释。系统阴影按窗口的 alpha 形状生成，跟着圆角走。
+        p.hasShadow = true
         p.level = .statusBar
         p.ignoresMouseEvents = true
         p.isMovable = false
@@ -278,7 +294,16 @@ struct HUDRoot: View {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .strokeBorder(Color.white.opacity(0.13), lineWidth: 0.7)
             }
-            .shadow(color: .black.opacity(0.34), radius: 12, y: 4)
+            // ⚠️ 这里**不能**用 SwiftUI 的 .shadow()。
+            //
+            //   宿主视图是 sizingOptions = [.intrinsicContentSize]，窗口尺寸正好等于
+            //   胶囊本身，**不含阴影的模糊半径**。于是 12pt 的阴影在窗口边界被硬生生
+            //   切断，屏幕上看到的就是一圈紧贴胶囊、带四个直角的灰色方块 ——
+            //   圆角白画了，整体像个没做完的控件。
+            //
+            //   加 padding 只是把硬边推远，阴影照样在 padding 边界被切（实测）。
+            //   正解是交给 NSWindow.hasShadow：系统按窗口的 alpha 形状生成阴影，
+            //   会自然跟着圆角走，也不受窗口 bounds 限制。见 ensurePanel()。
         }
         .fixedSize(horizontal: false, vertical: true)
     }
