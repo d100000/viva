@@ -110,7 +110,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.submenu = edit
         main.addItem(editItem)
 
+        // ⌘[ 也必须挂在主菜单上，理由和上面的 ⌘V 完全一样：
+        // 光在 SwiftUI 的工具栏按钮上写 .keyboardShortcut("[") 是不够的 ——
+        // LSUIElement/.accessory 的 App 里那条路不可靠（实测按下没反应），
+        // 而主菜单的 key equivalent 是全局分发的，稳定得多，顺带还能在菜单栏里被看见。
+        let viewItem = NSMenuItem()
+        let view = NSMenu(title: "视图")
+        let home = NSMenuItem(title: "返回主界面", action: #selector(goHome), keyEquivalent: "[")
+        home.target = self
+        view.addItem(home)
+        viewItem.submenu = view
+        main.addItem(viewItem)
+
         NSApp.mainMenu = main
+    }
+
+    @objc private func goHome() {
+        mainWindow.show()
+        NotificationCenter.default.post(name: .vivaGoHome, object: nil)
     }
 
     // MARK: - 启动流程

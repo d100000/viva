@@ -97,11 +97,38 @@ struct MainView: View {
                     .padding(20)
                 }
             }
+            // ⭐ 出口。侧边栏默认收起，所以进了任何一个二级页面之后就没有回头路了 ——
+            //   左下角那个入口只负责「进设置」，本身在设置页还会隐藏。
+            //   放在标题栏最左边是 macOS 的惯例位置，同时给 ⌘[（系统级「返回」）。
+            //   ⚠️ 用 HStack 显式写图标+文字，不要用 Label：macOS 工具栏里的 Label
+            //      默认只渲染图标，一个光秃秃的 chevron 认不出是「回主界面」。
+            .toolbar {
+                if page != .speak {
+                    ToolbarItem(placement: .navigation) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { page = .speak }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "chevron.backward")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("返回")
+                            }
+                        }
+                        // ⚠️ 这里**不要**加 .keyboardShortcut("[")：⌘[ 已经挂在主菜单的
+                        //    「视图 → 返回主界面」上（见 AppDelegate.installMainMenu）。
+                        //    同一个快捷键定义两遍没有好处，而主菜单那条路才是可靠的。
+                        .help("返回主界面（⌘[）")
+                    }
+                }
+            }
         }
         .navigationTitle(page == .speak ? "" : page.rawValue)
         .frame(minWidth: 860, minHeight: 620)
         .onReceive(NotificationCenter.default.publisher(for: .vivaOpenSettings)) { _ in
             withAnimation(.easeInOut(duration: 0.2)) { page = .settings }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .vivaGoHome)) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) { page = .speak }
         }
     }
 }

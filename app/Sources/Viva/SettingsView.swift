@@ -476,6 +476,16 @@ struct SettingsView: View {
                                isOn: $state.config.enableItn)
                         Toggle("语义顺滑（去掉「嗯」「那个」等口水词）",
                                isOn: $state.config.enableDdc)
+
+                        Toggle("去掉末尾句号（「今天开会。」→「今天开会」）",
+                               isOn: $state.config.stripTrailingPeriod)
+                            .disabled(!state.config.enablePunc)
+                        Label {
+                            Text("语音输入十有八九是往聊天框、搜索框、命令行里塞一句话，那个句号既多余又得手动删。**只去句号** —— 问号和感叹号带语气，去掉会改变意思；省略号「……」也会原样保留。\n逐句上屏时用的是「先扣下、下一句到了再补回去」，不是事后退格删 —— 本工具任何情况下都不会回头改已经写进你输入框的内容。")
+                        } icon: { Image(systemName: "text.badge.minus") }
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
                         Divider()
                         Toggle("二遍识别 enable_nonstream", isOn: $state.config.enableNonstream)
                         Label {

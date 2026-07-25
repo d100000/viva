@@ -38,6 +38,15 @@ struct Config: Codable {
     var enableItn: Bool = true
     /// 语义顺滑，去「嗯」「那个」等口水词
     var enableDdc: Bool = true
+
+    /// 去掉整段末尾的句号。
+    ///
+    /// 开了「自动标点」之后，识别结果一定以「。」收尾。但语音输入十有八九是往
+    /// 聊天框、搜索框、命令行里塞一句话 —— 那个句号既多余又得手动删。
+    /// 只去**句号**：问号和感叹号带语气，去掉会改变语义。
+    /// 实现见 TextPolish.stripTrailingPeriod（逐句上屏时用「扣下-补回」策略，
+    /// 绝不退格回改）。
+    var stripTrailingPeriod: Bool = true
     /// 热词直传，双向流式限 100 tokens
     var hotwords: [String] = []
 
@@ -140,6 +149,7 @@ struct Config: Codable {
         enablePunc = b(.enablePunc, def.enablePunc)
         enableItn = b(.enableItn, def.enableItn)
         enableDdc = b(.enableDdc, def.enableDdc)
+        stripTrailingPeriod = b(.stripTrailingPeriod, def.stripTrailingPeriod)
         hotwords = (try? c.decodeIfPresent([String].self, forKey: .hotwords)).flatMap { $0 } ?? def.hotwords
         hotkeyKeyCode = (try? c.decodeIfPresent(Int64.self, forKey: .hotkeyKeyCode)).flatMap { $0 } ?? def.hotkeyKeyCode
         hotkeyIsModifierOnly = b(.hotkeyIsModifierOnly, def.hotkeyIsModifierOnly)

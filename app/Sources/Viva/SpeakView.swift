@@ -574,6 +574,8 @@ extension Notification.Name {
     /// 从任意页面请求跳到「设置」。用通知而不是把 page 的 Binding 一路传下来 ——
     /// 只为一个跳转就改三层视图的签名不划算。
     static let vivaOpenSettings = Notification.Name("viva.openSettings")
+    /// 返回主界面（说话页）。工具栏的「返回」按钮和主菜单的 ⌘[ 都走这里。
+    static let vivaGoHome = Notification.Name("viva.goHome")
 }
 
 /// 工具条上的小玻璃按钮

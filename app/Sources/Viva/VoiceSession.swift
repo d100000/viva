@@ -16,6 +16,8 @@ final class VoiceSession {
     private var asr: DoubaoStreamingASR?
     private var committedText = ""
     private var pendingCommit = ""
+    /// 逐句上屏时扣下的句末句号，见 TextPolish.PeriodHold
+    private var periodHold = TextPolish.PeriodHold()
     /// 已经写进目标 App 的字符数（按字素簇计），润色替换时要靠它算退格次数
     private var injectedCharCount = 0
     private var targetBundleId: String?
@@ -126,6 +128,7 @@ final class VoiceSession {
         firstCharAt = nil
         committedText = ""
         pendingCommit = ""
+        periodHold.reset()          // 上一轮扣下的句号绝不能漏到这一轮句首
         injectedCharCount = 0
         didFallbackToClipboard = false
         billedSeconds = 0
@@ -197,6 +200,7 @@ final class VoiceSession {
         // 后续任何路径调到 inject(pendingCommit) 都会把用户已取消的内容粘出去
         pendingCommit = ""
         committedText = ""
+        periodHold.reset()
         hud.hideNow()
         app.isPolishing = false
         finishState()
@@ -218,6 +222,29 @@ final class VoiceSession {
 
     // MARK: - 流式结果
 
+    // MARK: - 上屏（去末尾句号）
+
+    /// 逐句上屏路径。走「扣下-补回」，因为写下这一句时还不知道它是不是最后一句，
+    /// 而事后回头删是绝对禁止的（见 TextPolish.PeriodHold）。
+    private func injectSentence(_ chunk: String) {
+        guard config.stripTrailingPeriod else { inject(chunk); return }
+        let out = periodHold.feed(chunk)
+        if !out.isEmpty { inject(out) }
+    }
+
+    /// 一次性整段上屏路径（松手才上屏 / 润色完成 / 润色失败退回原文）。
+    /// 这时全文已经在手上，直接去掉末尾那个句号即可，不需要扣下任何东西。
+    private func injectWhole(_ text: String) {
+        let out = config.stripTrailingPeriod ? TextPolish.stripTrailingPeriod(text) : text
+        guard !out.isEmpty else { return }
+        inject(out)
+    }
+
+    /// 用户在底部看到的、以及点「复制」拿到的，必须和真正写进输入框的一致
+    private func displayed(_ text: String) -> String {
+        config.stripTrailingPeriod ? TextPolish.stripTrailingPeriod(text) : text
+    }
+
     private func handle(_ u: ASRUpdate) {
         if firstCharAt == nil, !u.newDefinite.isEmpty || !u.partial.isEmpty {
             firstCharAt = Date()
@@ -236,7 +263,7 @@ final class VoiceSession {
             if deferCommit {
                 pendingCommit += u.newDefinite
             } else {
-                inject(u.newDefinite)          // 逐句上屏 —— 边说边打字
+                injectSentence(u.newDefinite)  // 逐句上屏 —— 边说边打字
             }
         }
 
@@ -261,7 +288,7 @@ final class VoiceSession {
         let tail = trailing.trimmingCharacters(in: .whitespacesAndNewlines)
         if !tail.isEmpty {
             committedText += tail
-            if deferCommit { pendingCommit += tail } else { inject(tail) }
+            if deferCommit { pendingCommit += tail } else { injectSentence(tail) }
         }
 
         if let s = startedAt {
@@ -288,7 +315,7 @@ final class VoiceSession {
 
         // ── 要不要润色 ──
         guard config.polishReady else {
-            if deferCommit, !testMode, !pendingCommit.isEmpty { inject(pendingCommit) }
+            if deferCommit, !testMode, !pendingCommit.isEmpty { injectWhole(pendingCommit) }
             pendingCommit = ""
             finalize(raw: raw, polished: nil)
             return
@@ -331,7 +358,7 @@ final class VoiceSession {
                 Log.warn("润色失败：\(error.localizedDescription)")
                 self.app.polishNote = "润色失败，已使用原文"
                 // 失败绝不能丢内容 —— 退回原文照常上屏
-                if !self.testMode, !pending.isEmpty { self.inject(pending) }
+                if !self.testMode, !pending.isEmpty { self.injectWhole(pending) }
                 self.pendingCommit = ""
                 self.finalize(raw: raw, polished: nil)
                 if !self.testMode {
@@ -347,15 +374,15 @@ final class VoiceSession {
         guard state == .polishing else { return }      // 兜底：已取消就不做任何事
         pendingCommit = ""
         app.polishNote = raw == polished ? "润色无改动（\(elapsedMs)ms）" : "已润色（\(elapsedMs)ms）"
-        app.committed = polished
+        app.committed = displayed(polished)
 
         if testMode {
             finalize(raw: raw, polished: polished)
             return
         }
         // 走到这里文字还没进目标 App，直接写润色后的版本 —— 不需要任何退格
-        inject(polished)
-        hud.update(committed: polished, partial: "")
+        injectWhole(polished)
+        hud.update(committed: displayed(polished), partial: "")
         hud.hide(after: 0.6)
         finalize(raw: raw, polished: polished)
     }
@@ -377,8 +404,12 @@ final class VoiceSession {
         }
         finishState()
 
+        // 底部那段文字是用户要复制/二次编辑的东西，必须和实际写进输入框的一致 ——
+        // 显示「你好。」而输入框里是「你好」会让人以为漏字了
+        if polished == nil { app.committed = displayed(raw) }
+
         if polished == nil, !testMode, !raw.isEmpty, !config.polishReady {
-            hud.update(committed: raw, partial: "")
+            hud.update(committed: displayed(raw), partial: "")
             hud.hide(after: 0.5)
         }
     }
