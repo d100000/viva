@@ -211,7 +211,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func reloadConfig() {
-        let new = state.config
+        // ⚠️ 读 appliedConfig，**不要**读 state.config。
+        //   state.config 是设置页的草稿，控件全都双向绑定在它上面。若这里读草稿，
+        //   任何一个「立刻生效」的入口（说话页的 AI 润色胶囊、加热词、换热键）
+        //   都会顺带把用户尚未保存、甚至打算丢弃的改动一起推进运行时 ——
+        //   包括那个被清空准备重贴的 API Key。
+        //   真正生效的那份由 saveConfig()（整份提交）或 commitField()（单字段提交）
+        //   在调这里之前写好。
+        let new = state.appliedConfig
         let old = appliedConfig
         appliedConfig = new
 
@@ -238,7 +245,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // ── 其余配置（热词、识别参数、润色、上屏方式）直接推给现有会话 ──
         session.update(config: new)
-        state.appliedConfig = new       // 让 isReady 反映的是真正生效的配置
 
         buildMenu()
         Log.info("配置已重新加载（热键重建：\(hotkeyChanged ? "是" : "否")）")

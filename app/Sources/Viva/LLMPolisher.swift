@@ -85,7 +85,11 @@ final class LLMPolisher {
 
         // ── system ──
         var system = config.polishPrompt.isEmpty ? Self.defaultPrompt : config.polishPrompt
-        if let app = contextApp, !app.isEmpty {
+        // ⚠️ 默认**不发**前台 App 名。它确实能让润色风格更贴场景，但代价是每说一句
+        //   就等于告诉服务商「此人此刻在用哪个 App」（1Password / Signal / 某内部工具），
+        //   而隐私说明里承诺的是「只发送识别出的文本」。属于未披露的额外数据，
+        //   必须由用户显式打开，见 Config.sendAppContext。
+        if config.sendAppContext, let app = contextApp, !app.isEmpty {
             // 同一句话在终端里和在微信里该润成不同风格
             system += "\n\n当前用户正在「\(app)」中输入，请让文本风格与该场景相符。"
         }
@@ -121,19 +125,27 @@ final class LLMPolisher {
         // ⚠️ timeoutInterval 的语义是「两次收到数据之间的空闲上限」，不是请求总时长。
         //    SSE 每收到一个 token、甚至一行 ": ping" 保活注释都会重置它，
         //    所以流式下它对总耗时**没有任何约束**。总时长由 streamed() 自己卡。
-        req.timeoutInterval = Double(config.polishTimeoutMs) / 1000.0
+        // 总超时按文本长度放宽。固定 5 秒对长口述本来就偏紧：服务端常见 30~80 token/s，
+        // 200 字的稿子 5 秒根本吐不完，每次都会撞线。
+        let budgetMs = config.polishTimeoutMs + trimmed.count * 30
+        req.timeoutInterval = Double(budgetMs) / 1000.0
 
         let t0 = Date()
         let (content, thinking) = config.polishStream
-            ? try await streamed(req, format)
+            ? try await streamed(req, format, budgetMs: budgetMs)
             : try await once(req, format)
 
         var out = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 模型偶尔会自作主张加引号，剥掉
+        // 模型偶尔会自作主张给整句加引号，剥掉。
+        // ⚠️ 必须确认首尾这一对**真的是包住整句的那一对**，不能只看首尾字符。
+        //   「“这个方案不行”，他说，“再想想”」首尾也各是一个引号，但分属两处引用，
+        //   直接削掉会得到引号不配对的残句，而且长度只少 2 个字符，
+        //   下面的 isSaneResult 护栏完全拦不住，会被原样粘进用户输入框。
         for pair in [("「", "」"), ("\"", "\""), ("“", "”")] {
-            if out.hasPrefix(pair.0), out.hasSuffix(pair.1), out.count > 2 {
-                out = String(out.dropFirst().dropLast())
-            }
+            guard out.hasPrefix(pair.0), out.hasSuffix(pair.1), out.count > 2 else { continue }
+            let inner = out.dropFirst().dropLast()
+            if inner.contains(pair.0) || inner.contains(pair.1) { continue }
+            out = String(inner)
         }
         guard !out.isEmpty else { throw PolishError.empty }
 
@@ -178,7 +190,8 @@ final class LLMPolisher {
     ///
     /// 另外注意：**这不会让总耗时变快** —— 模型要生成的 token 数一样，
     /// 流式只是把「等全部生成完」改成「生成一个吐一个」。收益全在感知上。
-    private func streamed(_ req: URLRequest, _ format: APIFormat) async throws -> (String, String) {
+    private func streamed(_ req: URLRequest, _ format: APIFormat,
+                          budgetMs: Int) async throws -> (String, String) {
         let (bytes, response): (URLSession.AsyncBytes, URLResponse)
         do { (bytes, response) = try await URLSession.shared.bytes(for: req) }
         catch let e as URLError where e.code == .timedOut { throw PolishError.timeout }
@@ -192,13 +205,18 @@ final class LLMPolisher {
 
         // 流式必须自己卡总时长，否则服务端慢速吐字能让 .polishing 无限期挂住，
         // 而 begin() 的 guard state == .idle 会让热键彻底失灵、且没有任何提示。
-        let deadline = Date().addingTimeInterval(Double(config.polishTimeoutMs) / 1000.0)
+        let deadline = Date().addingTimeInterval(Double(budgetMs) / 1000.0)
 
         var text = "", thinking = ""
         for try await line in bytes.lines {
             if Date() > deadline {
-                Log.warn("润色流式超时（已收 \(text.count) 字），按已收内容返回")
-                break
+                // ⚠️ 绝不能 break 把半截文本当成品返回。
+                //   已收的那部分会通过 isSaneResult 护栏（截了 25% 的话 ratio 仍在放行区间），
+                //   被 applyPolish 一次性粘进输入框，同时持有原文的 pendingCommit 被清空 ——
+                //   用户说的后半段就此静默消失，界面还显示「已润色」。
+                //   抛出去才能走 VoiceSession 既有的「退回原文照常上屏」兜底。
+                Log.warn("润色流式超时（已收 \(text.count) 字）—— 丢弃半成品，退回原文上屏")
+                throw PolishError.timeout
             }
             var payload = line
             if format.streamIsSSE {

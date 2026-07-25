@@ -272,7 +272,13 @@ final class DoubaoStreamingASR: NSObject {
         }
 
         lastPartial = update.partial
-        if !update.newDefinite.isEmpty || !update.partial.isEmpty || !update.fullText.isEmpty {
+        // ⚠️ 这道 didFinish 守卫不是冗余（下面的 finishUp、fail 各自都有一道）。
+        //   cancel() 只置 didFinish + task.cancel()，**已经排进 delegateQueue(.main)
+        //   的完成块拦不住**。少了它，用户按 Esc 之后、或 6 秒兜底 finishUp 之后，
+        //   在途的那一帧仍会触发 onUpdate → VoiceSession 在逐句上屏模式下把一句话
+        //   真的粘进用户输入框，而按「只追加绝不退格」这句永远撤不回。
+        if !didFinish,
+           !update.newDefinite.isEmpty || !update.partial.isEmpty || !update.fullText.isEmpty {
             onUpdate?(update)
         }
 

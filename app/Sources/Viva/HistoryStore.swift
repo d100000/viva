@@ -255,14 +255,19 @@ final class HistoryStore: ObservableObject {
     }
 
     func exportCSV() -> String {
-        var out = "时间,App,时长秒,字数,首字毫秒,文本\n"
+        // ⚠️ 表头必须是 7 列 —— 下面每行确实写了 7 个字段（文本 + 原文）。
+        //   原来表头只有 6 列，Excel/Numbers 打开会多出一列无表头数据，
+        //   导入脚本按表头取列会整体错位。
+        var out = "时间,App,时长秒,字数,首字毫秒,文本,原文\n"
         let df = ISO8601DateFormatter()
         for r in records.sorted(by: { $0.startedAt < $1.startedAt }) {
             func csv(_ v: String) -> String {
                 "\"" + v.replacingOccurrences(of: "\"", with: "\"\"") + "\""
             }
             let text = csv(r.finalText) + "," + csv(r.polishedText == nil ? "" : r.text)
-            out += "\(df.string(from: r.startedAt)),\(r.appName ?? ""),"
+            // App 名必须转义：localizedName 里带英文逗号的 App 会再切出一列，
+            // 把后面所有列整体右移。
+            out += "\(csv(df.string(from: r.startedAt))),\(csv(r.appName ?? "")),"
             out += String(format: "%.2f,%d,%@,", r.durationSec, r.charCount,
                           r.firstCharMs.map(String.init) ?? "")
             out += text + "\n"

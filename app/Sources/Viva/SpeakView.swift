@@ -484,13 +484,17 @@ private struct PolishToggle: View {
     @State private var showSetup = false
 
     private var on: Bool { state.config.enablePolish }
-    private var ready: Bool { state.config.polishReady }
+    /// 读 appliedConfig 而不是草稿：这个胶囊要回答的是「下一句真的会被润色吗」，
+    /// 而真正干活的 VoiceSession 拿的是 appliedConfig。设置页里改了模型但没保存时，
+    /// 读草稿会显示「已配好」，用户说完却收到「未配置」。
+    private var ready: Bool { state.appliedConfig.polishReady }
 
     var body: some View {
         Button {
             let turningOn = !on
-            state.config.enablePolish.toggle()
-            state.saveConfig()
+            // 只提交这一个字段。用 saveConfig() 会把设置页里尚未保存的整份草稿
+            // 一并落盘生效 —— 用户可能正把 API Key 清空准备重贴（见 commitField 注释）。
+            state.commitField { $0.enablePolish = turningOn }
             state.onReloadConfig?()
             // 刚打开却还没配模型 —— 这是用户意图最强的一瞬间，
             // 与其等他说完一句才弹「未配置」的红字，不如当场把路指出来。

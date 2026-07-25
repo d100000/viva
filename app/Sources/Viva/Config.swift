@@ -118,6 +118,14 @@ struct Config: Codable {
     var polishModel: String = ""
     /// 留空则用 LLMPolisher.defaultPrompt
     var polishPrompt: String = ""
+
+    /// 润色时是否把「当前前台 App 的名字」一并发给服务商，让它按场景调整风格
+    /// （在终端里和在微信里，同一句话该润成不同样子）。
+    ///
+    /// ⚠️ 默认关。开了等于每说一句就告诉服务商「此人此刻在用哪个 App」——
+    ///   1Password、Signal、某个内部工具都会被记上一笔。这是识别文本之外的
+    ///   额外数据，隐私说明里没承诺过，必须由用户显式打开。
+    var sendAppContext: Bool = false
     var polishTimeoutMs: Int = 5000
 
     /// 是否已经走过欢迎/配置引导。首次启动展示欢迎页，之后直接进主界面。
@@ -170,6 +178,7 @@ struct Config: Codable {
         polishApiKey = s(.polishApiKey, def.polishApiKey)
         polishModel = s(.polishModel, def.polishModel)
         polishPrompt = s(.polishPrompt, def.polishPrompt)
+        sendAppContext = b(.sendAppContext, def.sendAppContext)
         polishTimeoutMs = i(.polishTimeoutMs, def.polishTimeoutMs)
         hasSeenWelcome = b(.hasSeenWelcome, def.hasSeenWelcome)
     }

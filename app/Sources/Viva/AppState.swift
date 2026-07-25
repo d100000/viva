@@ -124,13 +124,42 @@ final class AppState: ObservableObject {
     /// 本次运行的粗略费用（豆包流式 2.0 后付费 1 元/小时）
     var estimatedCost: Double { billedSeconds / 3600.0 * 1.0 }
 
+    /// 「保存并应用」用的：把整份草稿落盘并正式生效。
+    /// ⚠️ 必须同步 appliedConfig —— reloadConfig 现在以它为准（不再读草稿），
+    ///   不同步的话点了保存也不会生效。
     func saveConfig() {
         do {
             try config.save()
+            appliedConfig = config
             lastError = ""
         } catch {
             lastError = "保存配置失败：\(error.localizedDescription)"
         }
+    }
+
+    /// 「立刻生效」类入口专用：只提交**这一个字段**，不碰设置页里其它未保存的草稿。
+    ///
+    /// ⚠️ 不要直接用 `saveConfig()` 做这件事。`config` 是设置页的草稿，控件全都双向
+    ///   绑定在它上面；用户可能正把 API Key 清空准备重贴、或者改了服务地址还没决定要不要留。
+    ///   这时候他在说话页随手点一下「AI 润色」胶囊、或者加一个热词、换一个热键，
+    ///   `saveConfig()` 会把**整份草稿**落盘并生效 —— 用户以为已经丢弃的改动全部生效，
+    ///   磁盘上的 config.json 也被覆盖（Key 被清空的话界面立刻掉成「未就绪」，原 Key 没了）。
+    ///
+    /// 正确做法是以 `appliedConfig`（真正生效中的那份）为基线打补丁，
+    /// 再把结果同步回草稿，这样草稿里其它未保存的改动原封不动留着。
+    func commitField(_ mutate: (inout Config) -> Void) {
+        var patched = appliedConfig
+        mutate(&patched)
+        do {
+            try patched.save()
+            lastError = ""
+        } catch {
+            lastError = "保存配置失败：\(error.localizedDescription)"
+            return
+        }
+        appliedConfig = patched
+        // 草稿里对应字段也要跟上，否则设置页再点保存会把刚生效的值又改回去
+        mutate(&config)
     }
 
     func pushHistory(text: String) {

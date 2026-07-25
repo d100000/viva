@@ -110,10 +110,12 @@ struct HotkeyRecorderField: View {
     }
 
     private func set(_ code: Int64, _ modOnly: Bool, _ mods: UInt64) {
-        state.config.hotkeyKeyCode = code
-        state.config.hotkeyIsModifierOnly = modOnly
-        state.config.hotkeyModifiers = mods
-        state.saveConfig()
+        // 只提交热键这三个字段，不连带把同屏其它未保存的草稿一起生效
+        state.commitField {
+            $0.hotkeyKeyCode = code
+            $0.hotkeyIsModifierOnly = modOnly
+            $0.hotkeyModifiers = mods
+        }
         state.onReloadConfig?()
     }
 }
@@ -281,7 +283,9 @@ struct DictionaryView: View {
     }
 
     private func persist() {
-        state.saveConfig()
+        // 同上：只提交词库，不连带提交设置页的草稿
+        let words = state.config.hotwords
+        state.commitField { $0.hotwords = words }
         state.onReloadConfig?()
         justSaved = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { justSaved = false }
@@ -363,6 +367,8 @@ struct SettingsView: View {
     @State private var catalogError = ""
     /// 换服务商时清掉了上一家的 Key，要明确告诉用户，否则会以为配置丢了
     @State private var keyCleared = false
+    /// 在飞的拉取请求。换服务商时要能取消，否则旧响应会覆盖新配置。
+    @State private var catalogTask: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
@@ -668,6 +674,16 @@ struct SettingsView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
 
+                            Divider()
+
+                            Toggle("把当前 App 名一并发给模型（按场景调整语气）",
+                                   isOn: $state.config.sendAppContext)
+                            Label {
+                                Text("**默认关闭。** 打开后，润色请求里会多一句「当前用户正在「微信」中输入」，让模型知道该用什么语气 —— 在终端里和在聊天框里，同一句话该润成不同样子。\n⚠️ 代价是每说一句就等于告诉服务商**你此刻在用哪个 App**（1Password、Signal、公司内部工具都会被记上一笔）。这是识别文本之外的额外数据，所以做成默认关、由你自己决定。")
+                            } icon: { Image(systemName: "hand.raised") }
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
                             Label {
                                 Text("⚠️ **当代模型几乎全都默认开启「深度思考」，而每家关闭的写法都不一样。** 润色一两句话本来该 1 秒内返回，开着思考会先吐一大段思维链——延迟涨到几秒，思维链还按输出 token 计费。上面的预设已经帮你按服务商传了正确的关闭参数；如果「测试连接」提示带思维链，说明没生效。")
                             } icon: { Image(systemName: "bolt.slash") }
@@ -707,8 +723,13 @@ struct SettingsView: View {
                                             Text("测试连接")
                                         }
                                     }
+                                    // Ollama 本地服务不校验鉴权（Config.polishReady 也对它豁免），
+                                    // 漏掉这条豁免会让这类用户永远点不了「测试连接」，
+                                    // 没有任何办法在真正说话之前验证润色是否可用。
+                                    // 判据与上面「拉取模型」保持一致。
                                     .disabled(state.polishTestRunning
-                                              || state.config.polishApiKey.isEmpty
+                                              || (state.config.polishApiKey.isEmpty
+                                                  && state.config.apiFormat != .ollamaNative)
                                               || state.config.polishModel.isEmpty)
 
                                     if let ms = state.polishTestMs {
@@ -784,7 +805,7 @@ struct SettingsView: View {
                         Text("**语音识别**：音频只发往你自己配置的火山引擎账号，不经过任何第三方服务器。")
                             .font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("**大模型润色**：只有开启润色时才会发生，且只发送识别出的文本（不发音频），发往你在上面选的那家服务商。⚠️ 如果你选的是「Viva 中转站」，文本会经过 bobdong.cn 中转到目标模型 —— 该中转站由本项目作者运营。介意的话，换成任意其它服务商，或者选 Ollama 做完全本地的润色。")
+                        Text("**大模型润色**：只有开启润色时才会发生，且只发送识别出的文本（不发音频），发往你在上面选的那家服务商。⚠️ 它是**默认服务商**：如果你没有换过，文本会经过 bobdong.cn 中转到目标模型 —— 该中转站由本项目作者运营，是本项目的收入来源。介意的话，换成任意其它服务商，或者选 Ollama 做完全本地的润色。\n另外：只有当你手动打开「把当前 App 名一并发给模型」时，请求里才会额外带上你所在 App 的名字；默认是关的。")
                             .font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
                         Text("识别记录、配置、热词全部保存在本机：")
@@ -858,8 +879,9 @@ struct SettingsView: View {
             state.config.polishApiKey = ""
             keyCleared = true
         }
-        // 上一家拉到的模型对这一家没有意义，留着会误导
-        catalog = []; catalogError = ""
+        // 上一家拉到的模型对这一家没有意义，留着会误导；在飞的请求也要掐掉
+        catalogTask?.cancel(); catalogTask = nil
+        catalog = []; catalogError = ""; catalogLoading = false
     }
 
     /// 一键切到中转站。地址、协议、端点一次性配好，只留 Key 要用户填 ——
@@ -869,19 +891,33 @@ struct SettingsView: View {
     }
 
     private func fetchModels() {
+        catalogTask?.cancel()
         catalogLoading = true
         catalogError = ""
         let base = state.config.polishBaseURL
         let key = state.config.polishApiKey
         let fmt = state.config.apiFormat
-        Task { @MainActor in
+        // ⚠️ 连服务商一起快照，回写前必须比对。
+        //   请求最长 15 秒，用户等不及切到别家是很自然的事；旧响应回来时
+        //   若不校验归属，会把上一家的模型列表塞进新服务商的界面，
+        //   autoPick 还会因为「新家的默认模型不在旧家列表里」而把 polishModel
+        //   静默改成旧家的第一个模型 —— 配置变成「B 家地址 + A 家模型」，
+        //   保存后每次润色都 404，而界面上没有任何异常提示。
+        let snapProvider = state.config.polishProvider
+        catalogTask = Task { @MainActor in
             defer { catalogLoading = false }
             do {
                 let list = try await ModelCatalog.fetch(baseURL: base, apiKey: key, format: fmt)
+                guard !Task.isCancelled,
+                      state.config.polishProvider == snapProvider,
+                      state.config.polishBaseURL == base else { return }
                 catalog = list
                 state.config.polishModel = ModelCatalog.autoPick(list,
                                                                  current: state.config.polishModel)
             } catch {
+                guard !Task.isCancelled,
+                      state.config.polishProvider == snapProvider,
+                      state.config.polishBaseURL == base else { return }
                 catalog = []
                 catalogError = error.localizedDescription
             }

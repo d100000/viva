@@ -85,15 +85,24 @@ func runSelfTest(path: String) -> Never {
     // 按 200ms 一包、间隔 200ms 推流，模拟真实说话节奏
     let chunkBytes = 6400
     var offset = 0
+    // ⚠️ send / finish 必须回主线程调用。
+    //   DoubaoStreamingASR 的前提是「所有可变状态收敛到主线程」（见其 delegateQueue 注释），
+    //   而 URLSession 的回调本来就在主线程跑 receiveLoop→handle，写着同一批 state/String。
+    //   在后台队列直接调是实打实的数据竞争，String 的写时复制缓冲区还会产生
+    //   retain/release 竞争，可能过度释放而崩溃。
+    //   另外 finish() 里那个 6 秒兜底 Timer 是挂到 RunLoop.current 上的 ——
+    //   在这个从不运行 run loop 的后台线程上它永远不会触发，
+    //   代理拦截 WebSocket 握手时就拿不到那条精确提示。
     let queue = DispatchQueue(label: "selftest.feed")
     queue.async {
         while offset < pcm.count {
             let end = min(offset + chunkBytes, pcm.count)
-            asr.send(audio: pcm.subdata(in: offset..<end))
+            let packet = pcm.subdata(in: offset..<end)
+            DispatchQueue.main.async { asr.send(audio: packet) }
             offset = end
-            Thread.sleep(forTimeInterval: 0.2)
+            Thread.sleep(forTimeInterval: 0.2)      // 节流仍在后台，不阻塞主线程
         }
-        asr.finish()
+        DispatchQueue.main.async { asr.finish() }
     }
 
     let deadline = Date().addingTimeInterval(seconds + 30)

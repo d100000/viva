@@ -165,6 +165,15 @@ final class AudioCapture {
             // 而且报给用户的原因还是错的（竞品那条「其他应用正在录音」就是这么来的）。
             try prewarm(force: true)
             rebuildRetries = 0
+            // ⚠️ 必须把 audioEngineReady 置回 true。它在下面重试耗尽时被置 false，
+            //   而全项目只有 AppDelegate 的启动流程会置 true（只跑一次）——
+            //   少了这一句它就是个单向闩锁：设备恢复后引擎其实已经好了，
+            //   但 canSpeak/isReady 恒为 false，录音球置灰、菜单栏一直显示未就绪，
+            //   用户只能重启 App。
+            Task { @MainActor in
+                AppState.shared.audioEngineReady = true
+                AppState.shared.lastError = ""
+            }
         } catch {
             // 重建失败不能静默 —— 用户会遇到「麦克风突然不工作了」而毫无线索
             Log.error("重建采集失败：\(error.localizedDescription)")
@@ -176,6 +185,8 @@ final class AudioCapture {
                     self?.rebuild()
                 }
             } else {
+                // 复位计数：不复位的话第二轮设备变化连一次重试都不会做
+                rebuildRetries = 0
                 Task { @MainActor in
                     AppState.shared.audioEngineReady = false
                     AppState.shared.lastError = "音频设备变化后重建失败（已重试 3 次）：\(error.localizedDescription)"
