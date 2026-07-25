@@ -1,0 +1,16 @@
+# ── 构建产物 ──
+app/.build/
+app/dist/
+*.xcodeproj
+.DS_Store
+
+# 图标的中间产物（由 tools/make_icon.swift 生成，.icns 保留）
+app/Resources/AppIcon.iconset/
+
+# ── 凭证：绝不入库 ──
+# 运行时配置在 ~/.config/viva/config.json，本来就不在仓库里，
+# 这几条是防止有人把副本拷进来。
+config.json
+history.json
+*.key
+.env

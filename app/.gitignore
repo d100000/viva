@@ -1,0 +1,9 @@
+.build/
+dist/
+*.xcodeproj
+.DS_Store
+
+# 绝不要把密钥提交进仓库。配置在 ~/.config/viva/config.json
+config.json
+*.key
+.env

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Viva</string>
+    <key>CFBundleDisplayName</key>
+    <string>Viva</string>
+    <key>CFBundleExecutable</key>
+    <string>Viva</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.local.viva</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+
+    <!-- 菜单栏 App：不进 Dock、不显示主窗口 -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- 缺这一条会在调用 AVAudioEngine 时直接崩溃，而不是弹权限框 -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>用于把你说的话实时转成文字。音频只发往你自己配置的火山引擎账号，不经过任何第三方服务器。</string>
+
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>用于监听「按住右 ⌘ 说话」这个全局热键。</string>
+
+    <key>NSAppleEventsUsageDescription</key>
+    <string>在自动上屏失败时，作为兜底方式把文字粘贴到当前应用。</string>
+</dict>
+</plist>
