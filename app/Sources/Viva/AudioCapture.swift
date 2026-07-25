@@ -99,6 +99,16 @@ final class AudioCapture {
             || transport == kAudioDeviceTransportTypeBluetoothLE
     }
 
+    /// 现在**能不能开始录音**。注意这和 `isRunning` 不是一回事。
+    ///
+    /// ⚠️ 蓝牙路径下引擎是**故意不常驻**的（常驻会把耳机永久拉进 HFP 通话模式，
+    ///   音乐变成打电话音质），要等按下热键才由 `startCapturing()` 即时启动。
+    ///   所以这种情况下 `isRunning == false` 是**预期状态，不是故障** ——
+    ///   调用方绝不能拿 `isRunning` 当「就绪」判据去拦录音，否则蓝牙耳机用户
+    ///   每次按热键都会被拦下，还会收到一句方向完全错误的「麦克风权限」报错，
+    ///   而 startCapturing 里那段专为蓝牙写的回退永远走不到。
+    var canStart: Bool { isRunning || Self.defaultInputIsBluetooth }
+
     /// App 启动时调用一次。引擎从此常驻，`isCapturing` 只控制数据往不往外送。
     ///
     /// - Parameter force: 忽略蓝牙判断强行预热（热键按下时用）

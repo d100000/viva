@@ -361,6 +361,8 @@ struct SettingsView: View {
     @State private var catalog: [ModelCatalog.Entry] = []
     @State private var catalogLoading = false
     @State private var catalogError = ""
+    /// 换服务商时清掉了上一家的 Key，要明确告诉用户，否则会以为配置丢了
+    @State private var keyCleared = false
 
     var body: some View {
         ScrollView {
@@ -530,14 +532,8 @@ struct SettingsView: View {
                                 .labelsHidden()
                                 .frame(width: 220)
                                 .onChange(of: state.config.polishProvider) { _, new in
-                                    // 换服务商时自动填地址和推荐模型，省得用户去查文档
-                                    let p = LLMProvider.find(new)
-                                    if p.id != "custom" {
-                                        state.config.polishBaseURL = p.baseURL
-                                        state.config.polishModel = p.models.first?.id ?? ""
-                                    }
-                                    // 上一家拉到的模型对这一家没有意义，留着会误导
-                                    catalog = []; catalogError = ""
+                                    // 地址、协议、端点、模型一次性对齐，并清空上一家的 Key
+                                    applyProvider(LLMProvider.find(new))
                                 }
                                 if let u = prov.keyURL {
                                     Button("获取 Key") {
@@ -587,6 +583,17 @@ struct SettingsView: View {
                                             : "该服务商的 API Key",
                                             text: $state.config.polishApiKey)
                                     .textFieldStyle(.roundedBorder)
+                                    .onChange(of: state.config.polishApiKey) { _, _ in
+                                        keyCleared = false
+                                    }
+                            }
+                            if keyCleared {
+                                Label {
+                                    Text("已清空上一家的 Key —— Key 是和服务商绑定的，换了服务商必须重填。（不清空的话，下次润色会把上一家的 Key 发到这个新地址去。）")
+                                } icon: { Image(systemName: "key.slash") }
+                                .font(.caption).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.leading, 78)
                             }
                             HStack {
                                 Text("模型").frame(width: 74, alignment: .leading)
@@ -829,16 +836,36 @@ struct SettingsView: View {
 
     // MARK: - 中转站 / 模型列表
 
-    /// 一键切到中转站。把地址、协议、端点一次性配好，只留 Key 要用户填 ——
+    /// 换服务商时统一走这里。两个入口（服务商下拉、「用中转站配置」按钮）都必须调它。
+    ///
+    /// ⚠️⚠️ **必须清空 polishApiKey。**
+    ///   地址换了、Key 没换，下一次润色就会把上一家的 API Key 原样发到新服务商的
+    ///   域名去（`Authorization: Bearer <别人家的key>`）—— 这是实打实的凭证外泄，
+    ///   而且用户完全无从察觉。中转站是本项目作者运营的，一键切过去还把用户的
+    ///   DeepSeek/OpenAI Key 一起送过来，性质更严重。
+    ///
+    /// 顺带把协议和端点也一起重置：预设表里每一家都兼容 OpenAI Chat，
+    /// 不重置的话「Anthropic 的 /messages + DeepSeek 的地址」这种组合直接 404。
+    private func applyProvider(_ p: LLMProvider) {
+        state.config.polishProvider = p.id
+        if p.id != "custom" {
+            state.config.polishBaseURL = p.baseURL
+            state.config.polishAPIFormat = APIFormat.openAIChat.rawValue
+            state.config.polishPath = APIFormat.openAIChat.defaultPath
+            state.config.polishModel = p.models.first?.id ?? ""
+        }
+        if !state.config.polishApiKey.isEmpty {
+            state.config.polishApiKey = ""
+            keyCleared = true
+        }
+        // 上一家拉到的模型对这一家没有意义，留着会误导
+        catalog = []; catalogError = ""
+    }
+
+    /// 一键切到中转站。地址、协议、端点一次性配好，只留 Key 要用户填 ——
     /// 少一步就多一分转化，而这几个字段填错任何一个都是直接 404。
     private func switchToRelay() {
-        let r = LLMProvider.find(LLMProvider.relayID)
-        state.config.polishProvider = r.id
-        state.config.polishBaseURL = r.baseURL
-        state.config.polishAPIFormat = APIFormat.openAIChat.rawValue
-        state.config.polishPath = APIFormat.openAIChat.defaultPath
-        state.config.polishModel = ""
-        catalog = []; catalogError = ""
+        applyProvider(LLMProvider.find(LLMProvider.relayID))
     }
 
     private func fetchModels() {
