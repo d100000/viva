@@ -4,21 +4,51 @@ import AppKit
 // MARK: - 导航
 
 enum Page: String, CaseIterable, Identifiable {
-    case dashboard = "总览"
-    case history   = "历史记录"
-    case stats     = "数据统计"
+    case speak      = "说话"
+    case history    = "历史记录"
+    case stats      = "数据统计"
     case dictionary = "词库"
-    case settings  = "设置"
+    case settings   = "设置"
 
     var id: String { rawValue }
+
     var icon: String {
         switch self {
-        case .dashboard:  return "square.grid.2x2"
+        case .speak:      return "mic.fill"
         case .history:    return "clock.arrow.circlepath"
         case .stats:      return "chart.bar.xaxis"
         case .dictionary: return "character.book.closed"
-        case .settings:   return "gearshape"
+        case .settings:   return "gearshape.fill"
         }
+    }
+
+    /// 侧边栏的彩色圆角图标底色。macOS 系统设置就是这个语言：
+    /// 每一项一个饱和度适中的纯色方块 + 白色 SF Symbol。
+    var tint: Color {
+        switch self {
+        case .speak:      return Color(red: 0.35, green: 0.42, blue: 0.96)
+        case .history:    return Color(red: 0.55, green: 0.55, blue: 0.60)
+        case .stats:      return Color(red: 0.20, green: 0.70, blue: 0.55)
+        case .dictionary: return Color(red: 0.95, green: 0.62, blue: 0.20)
+        case .settings:   return Color(red: 0.45, green: 0.48, blue: 0.54)
+        }
+    }
+}
+
+/// 侧边栏那种「彩色圆角方形 + 白色符号」的图标。
+/// 尺寸规格照 macOS 系统设置：20pt 方块、5pt 连续圆角、11pt 符号。
+struct SidebarIcon: View {
+    let page: Page
+    var body: some View {
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(LinearGradient(colors: [page.tint.opacity(0.95), page.tint],
+                                 startPoint: .top, endPoint: .bottom))
+            .frame(width: 20, height: 20)
+            .overlay {
+                Image(systemName: page.icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
     }
 }
 
@@ -27,19 +57,28 @@ enum Page: String, CaseIterable, Identifiable {
 struct MainView: View {
     @ObservedObject var state = AppState.shared
     @ObservedObject var store = HistoryStore.shared
-    @State private var page: Page = .dashboard
+    @State private var page: Page = .speak
+    /// ⭐ 默认只显示主区域。极简主页的前提是「一屏只做一件事」，
+    ///   侧边栏是需要时才拉出来的东西，不该一上来就占掉三分之一屏。
+    @State private var columns: NavigationSplitViewVisibility = .detailOnly
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             List(Page.allCases, selection: $page) { p in
-                Label(p.rawValue, systemImage: p.icon).tag(p)
+                Label {
+                    Text(p.rawValue)
+                } icon: {
+                    SidebarIcon(page: p)
+                }
+                .tag(p)
             }
-            .navigationSplitViewColumnWidth(min: 168, ideal: 180, max: 220)
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 196, max: 240)
             .safeAreaInset(edge: .bottom) { SidebarFooter(state: state) }
         } detail: {
             Group {
                 switch page {
-                case .dashboard:  DashboardView(state: state, store: store)
+                case .speak:      SpeakView(state: state, store: store)
                 case .history:    HistoryView(store: store)
                 case .stats:      StatsView(store: store)
                 case .dictionary: DictionaryView(state: state)
@@ -47,8 +86,65 @@ struct MainView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // ⭐ 左下角常驻入口。侧边栏默认收起之后，「设置」就彻底藏起来了，
+            //   而填 API Key 恰恰是新用户要做的第一件事 —— 必须给一个不用先
+            //   找到侧边栏开关就能点到的入口。没配好时它会变成高亮的行动号召。
+            .overlay(alignment: .bottomLeading) {
+                if page != .settings {
+                    QuickSettingsButton(state: state) {
+                        withAnimation(.easeInOut(duration: 0.2)) { page = .settings }
+                    }
+                    .padding(20)
+                }
+            }
         }
-        .frame(minWidth: 920, minHeight: 640)
+        .navigationTitle(page == .speak ? "" : page.rawValue)
+        .frame(minWidth: 860, minHeight: 620)
+    }
+}
+
+/// 左下角的设置入口。两种形态：
+/// - 未配置好 → 高亮胶囊「去配置」+ 橙色圆点，是个明确的行动号召
+/// - 已就绪   → 克制的灰色齿轮，不抢主界面的注意力
+private struct QuickSettingsButton: View {
+    @ObservedObject var state: AppState
+    let action: () -> Void
+    @State private var hovering = false
+
+    private var needsSetup: Bool { !state.canSpeak }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                if needsSetup {
+                    Circle().fill(Color.orange).frame(width: 6, height: 6)
+                    Text("去配置").font(.system(size: 12.5, weight: .medium))
+                } else {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("设置").font(.system(size: 12.5))
+                }
+            }
+            .foregroundStyle(needsSetup ? Color.orange : Color.secondary)
+            .padding(.horizontal, needsSetup ? 12 : 11)
+            .padding(.vertical, 7)
+            .background {
+                Capsule().fill(.regularMaterial)
+                Capsule().fill(needsSetup ? Color.orange.opacity(0.12) : Color.clear)
+            }
+            .overlay {
+                Capsule().strokeBorder(
+                    needsSetup ? Color.orange.opacity(0.35)
+                               : Color.primary.opacity(hovering ? 0.16 : 0.08))
+            }
+            .shadow(color: .black.opacity(hovering ? 0.10 : 0.05),
+                    radius: hovering ? 6 : 3, y: 2)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(needsSetup ? "还没配置 API Key，点这里去设置" : "打开设置")
+        .animation(.easeInOut(duration: 0.15), value: hovering)
+        .animation(.easeInOut(duration: 0.25), value: needsSetup)
     }
 }
 

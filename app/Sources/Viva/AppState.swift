@@ -108,6 +108,10 @@ final class AppState: ObservableObject {
             && audioEngineReady && hotkeyHealthy
     }
 
+    /// 能不能开始说话。比 isReady 宽松 —— 极简主页里对着 App 自己说话
+    /// 只需要麦克风和 Key，不需要辅助功能（那是写进别的 App 才要的）。
+    var canSpeak: Bool { micGranted && appliedConfig.hasCredentials && audioEngineReady }
+
     /// 真正生效中的配置（由 AppDelegate 在 reloadConfig 后同步）。
     /// 与 `config`（UI 编辑中的草稿）区分开。
     @Published var appliedConfig: Config = Config.load()

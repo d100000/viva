@@ -735,7 +735,7 @@ struct SettingsView: View {
                     Spacer()
                     VivaMark(size: 18)
                     VStack(alignment: .trailing, spacing: 1) {
-                        Text("Viva 0.2.0").font(.caption).foregroundStyle(.tertiary)
+                        Text("Viva 0.3.0").font(.caption).foregroundStyle(.tertiary)
                         Text("Just say Viva")
                             .font(.system(size: 10, weight: .medium, design: .rounded))
                             .foregroundStyle(.tertiary)
