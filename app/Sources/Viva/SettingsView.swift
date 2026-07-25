@@ -391,7 +391,16 @@ struct SettingsView: View {
                             .padding(.top, 6)
                         }
                         .font(.caption)
-                        Text("豆包流式语音识别 2.0 = volc.seedasr.sauc.duration（1 元/小时）。1.0 是 volc.bigasr.sauc.duration，贵 4.5 倍，没有理由用。")
+                        HStack(spacing: 10) {
+                            Button("获取 API Key") {
+                                NSWorkspace.shared.open(URL(string: "https://console.volcengine.com/speech/new/setting/apikeys?projectName=default")!)
+                            }
+                            .buttonStyle(.link)
+                            Text("需先开通「豆包流式语音识别模型 2.0」")
+                                .font(.caption).foregroundStyle(.tertiary)
+                            Spacer()
+                        }
+                        Text("豆包流式语音识别 2.0 = volc.seedasr.sauc.duration（1 元/小时）。1.0 是 volc.bigasr.sauc.duration，贵 4.5 倍，没有理由用。⚠️ 这个 Key 与「大模型润色」用的方舟 Key 不是同一套，两边账号体系独立。")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

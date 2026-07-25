@@ -152,10 +152,13 @@ struct VoiceOrb: View {
                             let p = ((t / 1.2) + Double(i) / 3.0)
                                 .truncatingRemainder(dividingBy: 1)
                             let eased = 1 - pow(1 - p, 3)          // easeOutCubic
+                            // ⚠️ 调研给的 scale 1.0→2.4 是按 160pt 小按钮定的。
+                            //    我们的球 208pt，2.4 倍就是 500pt，直接冲出可视区、
+                            //    最外圈和球完全脱节。按实际尺寸压到 1.45。
                             Circle()
-                                .strokeBorder(accent.opacity(0.35 * (1 - eased)),
-                                              lineWidth: 2 - 1.5 * eased)
-                                .scaleEffect(1.0 + 1.4 * eased)
+                                .strokeBorder(accent.opacity(0.30 * (1 - eased)),
+                                              lineWidth: 1.8 - 1.3 * eased)
+                                .scaleEffect(1.0 + 0.45 * eased)
                         }
                     }
                 }
@@ -181,7 +184,7 @@ struct VoiceOrb: View {
 
             // ② 音量光晕
             Circle()
-                .fill(accent.opacity(listening ? 0.16 + smooth * 0.22 : 0))
+                .fill(accent.opacity(listening ? 0.10 + smooth * 0.16 : 0))
                 .blur(radius: 26)
                 .scaleEffect(0.78 + smooth * 0.30)
 
@@ -192,14 +195,14 @@ struct VoiceOrb: View {
                 .fill(
                     LinearGradient(
                         colors: listening
-                            ? [accent.opacity(0.22), accent.opacity(0.07)]
+                            ? [accent.opacity(0.14), accent.opacity(0.04)]
                             : [Color(nsColor: .controlBackgroundColor),
                                Color(nsColor: .controlBackgroundColor).opacity(0.72)],
                         startPoint: .topLeading, endPoint: .bottomTrailing))
                 .overlay {
                     // 顶部一道高光，制造球面感
                     Circle().fill(
-                        LinearGradient(colors: [.white.opacity(listening ? 0.28 : 0.55), .clear],
+                        LinearGradient(colors: [.white.opacity(listening ? 0.42 : 0.55), .clear],
                                        startPoint: .top, endPoint: .center))
                 }
                 .overlay {
@@ -226,7 +229,7 @@ struct VoiceOrb: View {
                         .symbolEffect(.pulse, options: .repeating)
                 } else if listening {
                     OrbWaveform(level: smooth, tint: accent)
-                        .frame(width: 108, height: 52)
+                        .frame(width: 152, height: 88)
                 } else {
                     Image(systemName: "mic.fill")
                         .font(.system(size: 38, weight: .light))
@@ -240,8 +243,8 @@ struct VoiceOrb: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.72), value: pressing)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: listening)
         .onChange(of: level) { _, v in
-            // 一阶低通：新值权重 0.28，够跟手又不抖
-            smooth += (Double(v) - smooth) * 0.28
+            // 一阶低通。0.28 太平滑，语音的瞬时峰值全被削掉，波形显得没劲。
+            smooth += (Double(v) - smooth) * 0.45
         }
         .onChange(of: listening) { _, on in if !on { smooth = 0 } }
         .onAppear { breathe = true }
@@ -260,51 +263,61 @@ struct VoiceOrb: View {
 
 // MARK: - 球内波形
 
-/// 球体内部的波形 —— Siri 经典曲线（iOS 7/8 那一代）。
+/// 球体内部的波形 —— 密集细条的真实音频波形。
 ///
-/// 5 条同频不同衰减的正弦叠加，产生「有厚度、有重影」的光带，而不是单薄一根线。
-/// 参数全部取自对 Siri 波形的逆向实测表，不是拍脑袋调的：
-/// - 衰减系数 [-2, -6, 4, 2, 1]，透明度 [0.1, 0.2, 0.4, 0.6, 1.0]（最后一条是主线）
-/// - 全局衰减 att(x) = (4/(4+x⁴))⁴ —— 保证曲线在两端自然归零，不需要额外遮罩
-/// - frequency 6，相位每秒推进约 12 弧度
-///
-/// 用 Canvas 绘制而不是几十个 View：一次 draw call，比 View 树 diff 便宜得多。
+/// 关键是**相邻柱子高度差要大**。平滑的正弦起伏看起来像装饰条，
+/// 真实音频波形是根根不同、参差不齐的，这才有「声音」的感觉。
 private struct OrbWaveform: View {
     let level: Double
     let tint: Color
 
-    /// (衰减, 线宽, 透明度)
-    private let defs: [(att: Double, lw: Double, op: Double)] = [
-        (-2, 1, 0.10), (-6, 1, 0.20), (4, 1, 0.40), (2, 1, 0.60), (1, 1.6, 1.0)
-    ]
-
-    private func globalAtt(_ x: Double) -> Double { pow(4 / (4 + pow(x, 4)), 4) }
+    private let count = 34
+    private let barW: CGFloat = 2.6
+    private let gap: CGFloat = 2.2
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { ctx in
-            let phase = ctx.date.timeIntervalSinceReferenceDate * 12
+            let t = ctx.date.timeIntervalSinceReferenceDate
             Canvas { g, size in
-                let hMax = size.height / 2
-                // 电平映射：留一点底噪高度，否则安静时是一条死平线
-                let amp = 0.10 + min(1.0, level * 2.4) * 0.90
-                for d in defs {
-                    var path = Path()
-                    var first = true
-                    var i = -2.0
-                    while i <= 2.0 {
-                        let x = size.width * ((i + 2) / 4)
-                        let y = 0.6 * globalAtt(i) * (hMax * amp)
-                              * (1 / d.att) * sin(6 * i - phase)
-                        let pt = CGPoint(x: x, y: hMax + y)
-                        if first { path.move(to: pt); first = false }
-                        else { path.addLine(to: pt) }
-                        i += 0.02
-                    }
-                    g.blendMode = .plusLighter
-                    g.stroke(path, with: .color(tint.opacity(d.op)), lineWidth: d.lw)
+                let midY = size.height / 2
+                let total = CGFloat(count) * barW + CGFloat(count - 1) * gap
+                var x = (size.width - total) / 2
+
+                for i in 0..<count {
+                    let h = barHeight(i, t, maxH: size.height)
+                    let rect = CGRect(x: x, y: midY - h / 2, width: barW, height: h)
+                    g.fill(Path(roundedRect: rect, cornerRadius: barW / 2),
+                           with: .color(tint))
+                    x += barW + gap
                 }
             }
         }
+    }
+
+    /// 伪随机噪声。用 hash 而不是 sin 叠加 —— 叠正弦永远是平滑的，
+    /// 出不来相邻柱子高低悬殊的参差感。
+    private func noise(_ i: Int, _ step: Double) -> Double {
+        let v = sin(Double(i) * 12.9898 + step * 78.233) * 43758.5453
+        return v - floor(v)
+    }
+
+    private func barHeight(_ i: Int, _ t: Double, maxH: CGFloat) -> CGFloat {
+        // 每秒换 14 组噪声，两组之间插值 —— 太快会闪，太慢像卡住
+        let f = t * 14
+        let s0 = floor(f)
+        let k = f - s0
+        let smoothK = k * k * (3 - 2 * k)              // smoothstep
+        let n = noise(i, s0) * (1 - smoothK) + noise(i, s0 + 1) * smoothK
+
+        // 整体包络：中间高两端收，边缘不完全归零（参考图两端仍有小柱）
+        let center = Double(count - 1) / 2
+        let d = abs(Double(i) - center) / center
+        let env = 0.22 + pow(cos(d * .pi / 2), 1.6) * 0.78
+
+        let amp = 0.14 + min(1.0, level * 3.6) * 0.86
+        // n 的幂次拉开高低差：0.55 次方让高柱更高、低柱更低
+        let h = maxH * env * amp * (0.12 + pow(n, 0.55) * 0.88)
+        return max(barW, min(maxH, h))
     }
 }
 

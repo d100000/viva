@@ -111,7 +111,7 @@ struct WelcomeView: View {
                             }
                             Button("打开火山引擎控制台") {
                                 NSWorkspace.shared.open(
-                                    URL(string: "https://console.volcengine.com/speech/service")!)
+                                    URL(string: "https://console.volcengine.com/speech/new/setting/apikeys?projectName=default")!)
                             }
                             .buttonStyle(.link)
                         }
