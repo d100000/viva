@@ -74,12 +74,20 @@ struct Config: Codable {
     var enablePolish: Bool = false
 
     /// 厂商预设 id，见 LLMProvider.all
-    var polishProvider: String = "ark"
+    ///
+    /// 默认指向自家中转站：它是唯一「填一个 Key 就能用」的选项，其余每一家都要求
+    /// 注册 → 实名 → 充值 → 开通模型 → 再抄一个大小写敏感的模型名。
+    /// ⚠️ 因为默认值指向的是本项目作者运营的收费服务，「数据与隐私」那一节必须
+    ///    把润色文本会经过中转站这件事写在明面上（见 SettingsView 数据与隐私）。
+    ///    默认值可以有倾向，但不能是暗桩。
+    /// 注意这只影响**全新安装**：老用户配置里已存了 polishProvider，不会被改写。
+    var polishProvider: String = LLMProvider.relayID
     /// 仅 provider == "custom" 时生效：关闭深度思考的参数写法
     var polishThinkingOff: String = "none"
 
-    /// OpenAI 兼容的端点前缀（不含具体路径）
-    var polishBaseURL: String = "https://ark.cn-beijing.volces.com/api/v3"
+    /// OpenAI 兼容的端点前缀（不含具体路径）。必须与 polishProvider 的默认值配套 ——
+    /// 两者对不上会让新用户一上来就撞 404。
+    var polishBaseURL: String = "https://bobdong.cn/v1"
 
     /// 接口协议格式。各家的请求体、响应结构、鉴权头都不一样，猜错就是 400/404，
     /// 所以做成显式选项而不是自动嗅探。见 APIFormat。

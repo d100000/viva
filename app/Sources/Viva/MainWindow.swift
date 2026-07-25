@@ -100,6 +100,9 @@ struct MainView: View {
         }
         .navigationTitle(page == .speak ? "" : page.rawValue)
         .frame(minWidth: 860, minHeight: 620)
+        .onReceive(NotificationCenter.default.publisher(for: .vivaOpenSettings)) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) { page = .settings }
+        }
     }
 }
 

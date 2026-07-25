@@ -49,10 +49,33 @@ struct LLMProvider: Identifiable, Hashable {
     let temperature: Double
     let keyURL: String?
     let hint: String
+    /// 该服务是否实现了 OpenAI 标准的 `GET /models`。
+    /// 实现了就能「填 Key → 点一下 → 模型列表自动带出来」，省掉抄模型名这一步。
+    var supportsModelList: Bool = true
 
     // MARK: - 预设表
 
+    /// 官方中转站的 id。UI 里多处要引用它（转化位、默认值），别到处写字面量。
+    static let relayID = "viva-relay"
+    /// 带来源标记 —— 好处是不用在 App 里埋任何统计代码就能知道
+    /// Viva 到底带来了多少转化。本地优先的开源工具不该塞统计 SDK。
+    static let relaySite = "https://bobdong.cn/?from=viva"
+
     static let all: [LLMProvider] = [
+        // 放在第一位：这是唯一「填一个 Key 就能用」的选项，
+        // 其余每一家都要求用户去注册、实名、开通模型、再抄一个大小写敏感的模型名。
+        LLMProvider(
+            id: relayID,
+            // 名字要短 —— 选择器只有 220pt 宽，长名字会被截成「…」，
+            // 卖点写在下面的 hint 里，不要塞进选项名
+            name: "Viva 中转站（推荐）",
+            baseURL: "https://bobdong.cn/v1",
+            models: [],                    // 空表 → 由「拉取模型」在线获取，永不过期
+            thinkingOff: .thinkingDisabled,
+            useMaxCompletionTokens: false, sendTemperature: true, temperature: 0.2,
+            keyURL: relaySite,
+            hint: "国内外主流模型共用一个 Key、一个地址，按量计费。填好 Key 点右边的「拉取模型」，可用模型会自动列出来，不用去抄模型名。适合不想挨家注册、或者没有海外支付方式的情况。ℹ️ 这是本工具的默认选项，由本项目作者运营，也是本项目的收入来源 —— 润色文本会经过它中转（音频不会）。想完全本地化就选 Ollama，想用自己的账号就在上面换成对应服务商，功能完全一样。"
+        ),
         LLMProvider(
             id: "ark",
             name: "火山方舟（豆包）",

@@ -357,6 +357,11 @@ struct SettingsView: View {
     @ObservedObject var state: AppState
     @State private var saved = false
 
+    // 在线拉取到的模型列表（见 ModelCatalog）
+    @State private var catalog: [ModelCatalog.Entry] = []
+    @State private var catalogLoading = false
+    @State private var catalogError = ""
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -451,7 +456,10 @@ struct SettingsView: View {
                         .frame(width: 380)
 
                         Label {
-                            Text("**实测结论**：判停时长必须小于你说话时的自然停顿，否则「边说边打字」会退化成「说完才一次性上屏」。测试中设成 1500ms 后，句间停顿 900ms 的三句话全部憋到末尾才吐出来。真人换气通常 0.4~1.0 秒，**300~600ms 是安全区**。")
+                            Text("**实测结论**：判停时长必须小于你说话时的自然停顿，否则「边说边打字」会退化成「说完才一次性上屏」。测试中设成 1500ms 后，句间停顿 900ms 的三句话全部憋到末尾才吐出来。真人换气通常 0.4–1.0 秒，**300–600ms 是安全区**。")
+                            // ⚠️ 这里必须用连接号「–」而不是「~」：SwiftUI 的 Text 会把字符串
+                            //    当 Markdown 解析，一句话里出现两个 ~ 就成了删除线标记，
+                            //    实测把「1.0 秒，**300」整段划掉了。
                         } icon: { Image(systemName: "exclamationmark.triangle") }
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -498,6 +506,10 @@ struct SettingsView: View {
 
                             let prov = LLMProvider.find(state.config.polishProvider)
 
+                            if prov.id != LLMProvider.relayID {
+                                RelayPromoCard(onUse: switchToRelay)
+                            }
+
                             HStack {
                                 Text("服务商").frame(width: 74, alignment: .leading)
                                 Picker("", selection: $state.config.polishProvider) {
@@ -514,6 +526,8 @@ struct SettingsView: View {
                                         state.config.polishBaseURL = p.baseURL
                                         state.config.polishModel = p.models.first?.id ?? ""
                                     }
+                                    // 上一家拉到的模型对这一家没有意义，留着会误导
+                                    catalog = []; catalogError = ""
                                 }
                                 if let u = prov.keyURL {
                                     Button("获取 Key") {
@@ -568,7 +582,19 @@ struct SettingsView: View {
                                 Text("模型").frame(width: 74, alignment: .leading)
                                 TextField("模型 id", text: $state.config.polishModel)
                                     .textFieldStyle(.roundedBorder)
-                                if !prov.models.isEmpty {
+
+                                // 在线拉取到的列表优先 —— 它一定是最新的，
+                                // 而写死的预设表迟早会过期（见 LLMProvider 注释）
+                                if !catalog.isEmpty {
+                                    Menu("可用 \(catalog.count)") {
+                                        ForEach(catalog) { m in
+                                            Button(m.note.isEmpty ? m.id : "\(m.id) — \(m.note)") {
+                                                state.config.polishModel = m.id
+                                            }
+                                        }
+                                    }
+                                    .fixedSize()
+                                } else if !prov.models.isEmpty {
                                     Menu("建议") {
                                         ForEach(prov.models, id: \.id) { m in
                                             Button("\(m.id) — \(m.note)") {
@@ -578,6 +604,31 @@ struct SettingsView: View {
                                     }
                                     .fixedSize()
                                 }
+
+                                if prov.supportsModelList {
+                                    Button(catalogLoading ? "拉取中…" : "拉取模型") { fetchModels() }
+                                        .disabled(catalogLoading
+                                                  || state.config.polishBaseURL.isEmpty
+                                                  || (state.config.polishApiKey.isEmpty
+                                                      && state.config.apiFormat != .ollamaNative))
+                                        .fixedSize()
+                                }
+                            }
+
+                            if catalogLoading || !catalogError.isEmpty || !catalog.isEmpty {
+                                HStack(spacing: 6) {
+                                    if catalogLoading { ProgressView().controlSize(.small) }
+                                    Text(catalogLoading
+                                         ? "正在向服务端要模型列表…"
+                                         : (catalogError.isEmpty
+                                            ? "已拉到 \(catalog.count) 个可用模型（已过滤掉向量/语音/画图这类不能用来润色的）。"
+                                            : catalogError))
+                                        .font(.caption)
+                                        .foregroundStyle(catalogError.isEmpty ? .secondary : Color.orange)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer()
+                                }
+                                .padding(.leading, 78)
                             }
 
                             if prov.id == "custom" {
@@ -709,7 +760,17 @@ struct SettingsView: View {
 
                 GroupBox("数据与隐私") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("音频只发往你自己配置的火山引擎账号，不经过任何第三方服务器。识别记录、配置、热词全部保存在本机：")
+                        // ⚠️ 这段必须分层说。原来只有一句「不经过任何第三方服务器」，
+                        //    但「大模型润色」一旦配到中转站，润色文本就确实经过第三方了 ——
+                        //    而且那个第三方是本项目作者运营的。代码是开源的，含糊其辞一定会被扒出来，
+                        //    主动写清楚 + 给出本地替代方案，比事后解释划算得多。
+                        Text("**语音识别**：音频只发往你自己配置的火山引擎账号，不经过任何第三方服务器。")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("**大模型润色**：只有开启润色时才会发生，且只发送识别出的文本（不发音频），发往你在上面选的那家服务商。⚠️ 如果你选的是「Viva 中转站」，文本会经过 bobdong.cn 中转到目标模型 —— 该中转站由本项目作者运营。介意的话，换成任意其它服务商，或者选 Ollama 做完全本地的润色。")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("识别记录、配置、热词全部保存在本机：")
                             .font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(Config.configDir.path)
@@ -754,6 +815,105 @@ struct SettingsView: View {
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: - 中转站 / 模型列表
+
+    /// 一键切到中转站。把地址、协议、端点一次性配好，只留 Key 要用户填 ——
+    /// 少一步就多一分转化，而这几个字段填错任何一个都是直接 404。
+    private func switchToRelay() {
+        let r = LLMProvider.find(LLMProvider.relayID)
+        state.config.polishProvider = r.id
+        state.config.polishBaseURL = r.baseURL
+        state.config.polishAPIFormat = APIFormat.openAIChat.rawValue
+        state.config.polishPath = APIFormat.openAIChat.defaultPath
+        state.config.polishModel = ""
+        catalog = []; catalogError = ""
+    }
+
+    private func fetchModels() {
+        catalogLoading = true
+        catalogError = ""
+        let base = state.config.polishBaseURL
+        let key = state.config.polishApiKey
+        let fmt = state.config.apiFormat
+        Task { @MainActor in
+            defer { catalogLoading = false }
+            do {
+                let list = try await ModelCatalog.fetch(baseURL: base, apiKey: key, format: fmt)
+                catalog = list
+                state.config.polishModel = ModelCatalog.autoPick(list,
+                                                                 current: state.config.polishModel)
+            } catch {
+                catalog = []
+                catalogError = error.localizedDescription
+            }
+        }
+    }
+}
+
+// MARK: - 中转站转化位
+
+/// 「大模型润色」里的一张软广。
+///
+/// 放这里是有理由的：用户勾上润色开关的那一刻，正好撞上整个软件里最劝退的一段路 ——
+/// 要去某家云厂商注册、实名、充值、开通模型、建 Key、再抄一个大小写敏感的模型名回来。
+/// 转化位就该出现在痛点发生的地方，而不是首页横幅。
+///
+/// 分寸：只在**没在用中转站**时显示；不挡住任何原有选项；不做任何夸张承诺。
+private struct RelayPromoCard: View {
+    let onUse: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(.tint)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text("懒得挨家注册？用 Viva 中转站")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("一个 Key 通国内外")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tint)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                }
+
+                Text("国内外主流模型共用一个 Key、一个地址，按量计费、价格很低，也不需要海外支付方式。填好 Key 点「拉取模型」，可用模型自动列出来 —— 不用抄模型名，不用查文档。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    Button("用中转站配置", action: onUse)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("看看价格和支持的模型") {
+                        if let u = URL(string: LLMProvider.relaySite) {
+                            NSWorkspace.shared.open(u)
+                        }
+                    }
+                    .buttonStyle(.link)
+                    .controlSize(.small)
+                    Spacer()
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(Color.accentColor.opacity(hovering ? 0.10 : 0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .strokeBorder(Color.accentColor.opacity(0.22))
+        )
+        .onHover { hovering = $0 }
     }
 }
 

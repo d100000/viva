@@ -481,14 +481,21 @@ private struct PolishToggle: View {
     @ObservedObject var state = AppState.shared
     @State private var hovering = false
 
+    @State private var showSetup = false
+
     private var on: Bool { state.config.enablePolish }
     private var ready: Bool { state.config.polishReady }
 
     var body: some View {
         Button {
+            let turningOn = !on
             state.config.enablePolish.toggle()
             state.saveConfig()
             state.onReloadConfig?()
+            // 刚打开却还没配模型 —— 这是用户意图最强的一瞬间，
+            // 与其等他说完一句才弹「未配置」的红字，不如当场把路指出来。
+            if turningOn && !ready { showSetup = true }
+            else if !turningOn { showSetup = false }
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "sparkles")
@@ -513,10 +520,60 @@ private struct PolishToggle: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(on
-              ? (ready ? "已开启：松手后先润色再显示" : "已开启但未配置模型，去设置里补上")
+              ? (ready ? "已开启：松手后先润色再显示" : "已开启但未配置模型，点一下看怎么配")
               : "关闭状态：直接显示原始识别结果")
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: on)
+        .popover(isPresented: $showSetup, arrowEdge: .top) {
+            PolishSetupPopover { showSetup = false }
+        }
     }
+}
+
+/// 开了润色但没配模型时弹的引导。
+///
+/// 这里是整个产品转化意图最强的一个点：用户刚刚亲手表达了「我想要 AI 润色」，
+/// 而挡在他和这个功能之间的是「去某家云厂商注册 → 实名 → 充值 → 开通模型 →
+/// 建 Key → 抄模型名」这一长串。把最短的那条路直接摆出来。
+private struct PolishSetupPopover: View {
+    let onDone: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles").foregroundStyle(.tint)
+                Text("还差一个润色模型").font(.system(size: 13, weight: .semibold))
+            }
+            Text("润色要调一个大模型。挨家云厂商注册的话，实名、充值、开通模型、抄模型名，一套下来十几分钟；用 **Viva 中转站**的话，国内外的模型共用一个 Key，填进去点「拉取模型」就自动配好了。")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 300, alignment: .leading)
+
+            HStack(spacing: 8) {
+                Button("去拿一个 Key") {
+                    if let u = URL(string: LLMProvider.relaySite) {
+                        NSWorkspace.shared.open(u)
+                    }
+                    NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
+                    onDone()
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+
+                Button("已经有 Key 了") {
+                    NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
+                    onDone()
+                }
+                .controlSize(.small)
+                Spacer()
+            }
+        }
+        .padding(13)
+    }
+}
+
+extension Notification.Name {
+    /// 从任意页面请求跳到「设置」。用通知而不是把 page 的 Binding 一路传下来 ——
+    /// 只为一个跳转就改三层视图的签名不划算。
+    static let vivaOpenSettings = Notification.Name("viva.openSettings")
 }
 
 /// 工具条上的小玻璃按钮

@@ -155,14 +155,9 @@ struct WelcomeView: View {
                                 .strokeBorder(Color.secondary.opacity(0.22)))
 
                             HStack(spacing: 12) {
-                                Text(pressing ? "松开结束" : "按住说话")
-                                    .font(.system(size: 13.5, weight: .medium))
-                                    .foregroundStyle(pressing ? .white : .primary)
-                                    .frame(width: 132, height: 34)
-                                    .background(pressing ? Color.accentColor
-                                                         : Color(nsColor: .controlColor),
-                                                in: RoundedRectangle(cornerRadius: 8))
-                                    .contentShape(Rectangle())
+                                HoldToSpeakButton(pressing: pressing,
+                                                  level: state.level)
+                                    .contentShape(Capsule())
                                     .gesture(
                                         DragGesture(minimumDistance: 0)
                                             .onChanged { _ in
@@ -315,4 +310,83 @@ final class WelcomeWindowController: NSObject, NSWindowDelegate {
     }
 
     func close() { window?.orderOut(nil) }
+}
+
+
+// MARK: - 引导页的「按住说话」
+
+/// 引导页里那个测试按钮。
+///
+/// 原来是一个 132×34 的灰色小胶囊，和旁边的普通按钮长得一模一样 ——
+/// 用户根本看不出它是**要按住不放**的，而这是整个引导流程里唯一需要
+/// 亲手操作的一步。所以它必须一眼就跟其它控件区分开：
+/// 更大、有主色、带麦克风图标、空闲时轻微呼吸吸引注意。
+private struct HoldToSpeakButton: View {
+    let pressing: Bool
+    let level: Float
+    @State private var breathe = false
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: pressing ? "waveform" : "mic.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .symbolEffect(.variableColor.iterative, options: .repeating, isActive: pressing)
+
+            Text(pressing ? "松开结束" : "按住说话")
+                .font(.system(size: 14, weight: .semibold))
+
+            if pressing {
+                // 按住时右侧跟一小段电平条，明确「正在听」
+                MiniLevel(level: level)
+                    .frame(width: 26, height: 14)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 11)
+        .background {
+            Capsule().fill(
+                LinearGradient(
+                    colors: pressing
+                        ? [Color.accentColor, Color.accentColor.opacity(0.82)]
+                        : [Color.accentColor.opacity(0.95), Color.accentColor.opacity(0.78)],
+                    startPoint: .top, endPoint: .bottom))
+        }
+        .overlay {
+            // 空闲时一圈缓慢扩散的光环，把视线拉过来
+            if !pressing {
+                Capsule()
+                    .stroke(Color.accentColor.opacity(breathe ? 0 : 0.45), lineWidth: 2)
+                    .scaleEffect(breathe ? 1.14 : 1.0)
+                    .animation(.easeOut(duration: 1.6).repeatForever(autoreverses: false),
+                               value: breathe)
+            }
+        }
+        .scaleEffect(pressing ? 0.96 : (hovering ? 1.03 : 1.0))
+        .shadow(color: Color.accentColor.opacity(pressing ? 0.45 : 0.28),
+                radius: pressing ? 14 : 8, y: 4)
+        .animation(.spring(response: 0.28, dampingFraction: 0.7), value: pressing)
+        .animation(.easeInOut(duration: 0.15), value: hovering)
+        .onHover { hovering = $0 }
+        .onAppear { breathe = true }
+    }
+}
+
+private struct MiniLevel: View {
+    let level: Float
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .center, spacing: 2) {
+                ForEach(0..<4, id: \.self) { i in
+                    let w = sin(t * 7 + Double(i) * 1.1) * 0.5 + 0.5
+                    let h = 3 + CGFloat(min(1, level * 3.4)) * 11 * (0.5 + w * 0.5)
+                    Capsule().fill(.white.opacity(0.9))
+                        .frame(width: 2.5, height: max(3, h))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
 }
