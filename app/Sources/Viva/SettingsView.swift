@@ -346,7 +346,7 @@ private struct PresetWordlistSection: View {
                     }
                     Spacer()
                 }
-                Text("词库由官方仓库维护，每天自动同步 —— 仓库里加了新词，全体用户次日就能用上，不用等发版。你自己的热词永远排在预设词前面。")
+                Text("词库由官方仓库维护，每天自动同步 —— 仓库里加了新词，全体用户次日就能用上，不用等发版。热词直传有约 60 词的窗口：你自己的热词永远最优先，其后按上面的顺序取,开太多库时靠后的会被截断；替换规则不受此限制。")
                     .font(.caption).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -747,9 +747,8 @@ struct SettingsView: View {
 
                             let prov = LLMProvider.find(state.config.polishProvider)
 
-                            if prov.id != LLMProvider.relayID {
-                                RelayPromoCard(onUse: switchToRelay)
-                            }
+                            RelayBanner(isCurrent: prov.id == LLMProvider.relayID,
+                                        onUse: switchToRelay)
 
                             HStack {
                                 Text("服务商").frame(width: 74, alignment: .leading)
@@ -1765,59 +1764,93 @@ private struct InputLevelMeter: View {
 /// 转化位就该出现在痛点发生的地方，而不是首页横幅。
 ///
 /// 分寸：只在**没在用中转站**时显示；不挡住任何原有选项；不做任何夸张承诺。
-private struct RelayPromoCard: View {
+/// 中转站品牌 banner。常驻在润色配置区顶部（选没选中转站都显示）——
+/// 这是 08 号营销方案里的「产品内转化位」，但要守住三条红线：
+/// 不弹窗、不挡功能、身份透明（数据与隐私一节已声明它是作者运营的收费服务）。
+private struct RelayBanner: View {
+    /// 当前服务商是否已是中转站（是 → 只留「前往」，不再劝切换）
+    let isCurrent: Bool
     let onUse: () -> Void
     @State private var hovering = false
 
+    private var site: String {
+        LLMProvider.relaySite.replacingOccurrences(of: "https://", with: "")
+            .components(separatedBy: "/").first ?? "bobdong.cn"
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.tint)
-                .padding(.top, 2)
+        HStack(spacing: 12) {
+            Image(systemName: "bolt.horizontal.circle.fill")
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(.white)
 
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Text("懒得挨家注册？用 Viva 中转站")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("一个 Key 通国内外")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.tint)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-                }
-
-                Text("国内外主流模型共用一个 Key、一个地址，按量计费、价格很低，也不需要海外支付方式。填好 Key 点「拉取模型」，可用模型自动列出来 —— 不用抄模型名，不用查文档。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: 8) {
-                    Button("用中转站配置", action: onUse)
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    Button("看看价格和支持的模型") {
-                        if let u = URL(string: LLMProvider.relaySite) {
-                            NSWorkspace.shared.open(u)
-                        }
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
+                    Text("Viva 中转站")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text(site)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.85))
+                    ForEach(["稳定", "高并发", "企业级"], id: \.self) { tag in
+                        Text(tag)
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(.white.opacity(0.18)))
                     }
-                    .buttonStyle(.link)
-                    .controlSize(.small)
-                    Spacer()
                 }
-                .padding(.top, 2)
+                Text("国内外主流模型共用一个 Key · 按量计费 · 生产级稳定性与并发，个人和企业都能直接接")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
             }
+
+            Spacer(minLength: 8)
+
+            if !isCurrent {
+                Button(action: onUse) {
+                    Text("一键使用")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(Color.purple)
+                        .padding(.horizontal, 11).padding(.vertical, 5)
+                        .background(Capsule().fill(.white))
+                }
+                .buttonStyle(.plain)
+            }
+            Button {
+                if let u = URL(string: LLMProvider.relaySite) {
+                    NSWorkspace.shared.open(u)
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Text(isCurrent ? "前往 \(site)" : "前往")
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 11).padding(.vertical, 5)
+                .background(Capsule().strokeBorder(.white.opacity(0.55), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
         }
-        .padding(11)
+        .padding(.horizontal, 13).padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 9)
-                .fill(Color.accentColor.opacity(hovering ? 0.10 : 0.07))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(LinearGradient(
+                    colors: [Color(red: 0.42, green: 0.30, blue: 0.95),
+                             Color(red: 0.72, green: 0.29, blue: 0.86)],
+                    startPoint: .leading, endPoint: .trailing))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9)
-                .strokeBorder(Color.accentColor.opacity(0.22))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(.white.opacity(hovering ? 0.35 : 0.15))
         )
+        .shadow(color: Color.purple.opacity(hovering ? 0.35 : 0.2),
+                radius: hovering ? 10 : 6, y: 3)
         .onHover { hovering = $0 }
+        .animation(.easeInOut(duration: 0.15), value: hovering)
     }
 }
 

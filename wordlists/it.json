@@ -1,30 +1,32 @@
 {
   "schema": 1,
   "id": "it",
-  "name": "IT / 编程常用词",
-  "description": "面向开发者的官方预设词库：AI 工具、编程语言、框架与基础设施的专有名词，外加几条确定性替换纠错。由仓库维护，App 每天自动同步最新版。",
-  "version": 1,
-  "updatedAt": "2026-07-26",
+  "name": "编程 / 基础设施",
+  "description": "编程语言、框架、数据库与基础设施的常用专名。AI 相关词已拆到「AI 工具与模型」库单独维护。选词标准：只收语音识别容易识错的英文专名与中英混合词。",
+  "version": 2,
+  "updatedAt": "2026-07-27",
   "hotwords": [
-    "Claude", "Claude Code", "ChatGPT", "OpenAI", "Anthropic", "DeepSeek",
-    "Gemini", "Copilot", "Cursor", "Midjourney", "Stable Diffusion",
-    "大模型", "提示词", "智能体", "上下文", "微调", "向量数据库",
-    "Transformer", "Token", "Prompt", "Agent", "RAG", "MCP",
     "GitHub", "GitLab", "Git", "Docker", "Kubernetes", "Nginx", "Redis",
-    "MySQL", "PostgreSQL", "MongoDB", "SQLite", "Elasticsearch",
-    "Linux", "Ubuntu", "macOS", "iOS", "Android", "Windows",
-    "VS Code", "Xcode", "Vim", "Homebrew", "Terminal", "Shell", "Bash",
+    "MySQL", "PostgreSQL", "MongoDB", "SQLite", "Elasticsearch", "Kafka",
+    "Linux", "Ubuntu", "Debian", "macOS", "iOS", "Android",
+    "VS Code", "Xcode", "Vim", "Homebrew", "Terminal", "Shell", "Bash", "Zsh",
     "Python", "JavaScript", "TypeScript", "Swift", "Kotlin", "Rust",
-    "Golang", "Node.js", "React", "Vue", "Flutter", "Electron",
-    "API", "SDK", "HTTP", "HTTPS", "WebSocket", "JSON", "YAML",
-    "SQL", "GraphQL", "gRPC", "OAuth", "JWT", "CI/CD", "DevOps",
-    "微服务", "容器化", "灰度发布", "回滚", "压测", "联调", "鉴权",
-    "消息队列", "内存泄漏", "断点调试", "代码评审", "单元测试"
+    "Golang", "Node.js", "React", "Vue", "Next.js", "Flutter",
+    "Electron", "WebSocket", "GraphQL", "gRPC", "OAuth", "JWT",
+    "JSON", "YAML", "CI/CD", "DevOps", "Serverless",
+    "灰度发布", "压测", "联调", "鉴权", "埋点", "上屏", "热词"
   ],
   "replaceRules": [
-    { "from": "Cloth Code", "to": "Claude Code" },
-    { "from": "克劳德", "to": "Claude" },
     { "from": "派森", "to": "Python" },
-    { "from": "吉特哈布", "to": "GitHub" }
+    { "from": "吉特哈布", "to": "GitHub" },
+    { "from": "库伯内提斯", "to": "Kubernetes" },
+    { "from": "web socket", "to": "WebSocket" },
+    { "from": "Web Socket", "to": "WebSocket" },
+    { "from": "type script", "to": "TypeScript" },
+    { "from": "Type Script", "to": "TypeScript" },
+    { "from": "java script", "to": "JavaScript" },
+    { "from": "Java Script", "to": "JavaScript" },
+    { "from": "vs code", "to": "VS Code" },
+    { "from": "Vs code", "to": "VS Code" }
   ]
 }

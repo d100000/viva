@@ -26,8 +26,9 @@ struct Wordlist: Codable, Identifiable {
 final class WordlistStore: ObservableObject {
     static let shared = WordlistStore()
 
-    /// 目前只有 it 一个库；将来加库只需在这里登记 + 仓库里放 JSON
-    static let knownIds = ["it"]
+    /// 词库注册表。**数组顺序 = 合并优先级**（热词窗口约 60 词，先到先得）：
+    /// AI 词 churn 最快、混淆度最高排最前。加库 = 这里登记 + 仓库 wordlists/ 放 JSON。
+    static let knownIds = ["ai", "it", "work"]
     /// raw.githubusercontent.com 的 main 分支 —— 改仓库文件即全网生效
     static let remoteBase = "https://raw.githubusercontent.com/d100000/viva/main/wordlists"
 

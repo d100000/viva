@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "work",
+  "name": "互联网职场",
+  "description": "协作工具名与职场高频缩写：飞书 Notion Figma、OKR PRD DAU 这一类。默认关闭 —— 需要的自己打开；开启后与其它库共享约 60 词的热词窗口，排序靠后。",
+  "version": 1,
+  "updatedAt": "2026-07-27",
+  "hotwords": [
+    "飞书", "钉钉", "企业微信", "Notion", "Figma", "Jira", "Confluence",
+    "Slack", "Zoom", "Teams", "Obsidian", "语雀", "石墨文档",
+    "OKR", "KPI", "ROI", "SaaS", "ToB", "ToC", "MVP", "PRD",
+    "DAU", "MAU", "GMV", "SKU", "SOP", "ARPU",
+    "A/B 测试", "用户画像", "竞品分析", "需求评审", "转化率", "留存率"
+  ],
+  "replaceRules": []
+}

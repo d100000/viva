@@ -61,9 +61,10 @@ struct Config: Codable {
     var stripTrailingPeriod: Bool = true
     /// 热词直传，双向流式限 100 tokens
     var hotwords: [String] = []
-    /// 启用的预设词库 id（见 WordlistStore.knownIds）。默认启用 IT 库 ——
-    /// 本产品的目标人群就是开发者，且词库页一眼可关。用户词永远排在预设词前面。
-    var enabledWordlists: [String] = ["it"]
+    /// 启用的预设词库 id（见 WordlistStore.knownIds）。默认启用 AI + 编程库 ——
+    /// 本产品的目标人群就是开发者，且词库页一眼可关；「互联网职场」库默认关。
+    /// 用户词永远排在预设词前面。选词与容量权衡见 10-预设词库方案.md。
+    var enabledWordlists: [String] = ["ai", "it"]
     /// 确定性替换规则（改词记忆）。definite/partial 都过一遍，热词纠不动的靠它。
     var replaceRules: [ReplaceRule] = []
 
