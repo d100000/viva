@@ -477,6 +477,16 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                         Toggle("松手才上屏（不逐句上屏）", isOn: $state.config.commitOnlyAtEnd)
+
+                        Divider()
+
+                        Toggle("连续听写：长句中途也逐段上屏", isOn: $state.config.progressiveCommit)
+                            .disabled(state.config.commitOnlyAtEnd)
+                        Label {
+                            Text("服务端只在你**停顿**时才定稿一句。一口气说长句不换气时，文字会全部憋到说完 —— 开启后，已经稳定、以标点收尾的部分会提前写进光标处。**开了 AI 润色时此功能自动让位**（润色需要拿全文重写）。\n配合**双击 \(HotkeyManager.describe(state.config)) 锁定**使用：双击开始连续听写，不用一直按着，再按一下结束。长文口述、会议记录都是这么用。")
+                        } icon: { Image(systemName: "infinity") }
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(6)
                 }

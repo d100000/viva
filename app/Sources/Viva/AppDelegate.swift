@@ -14,6 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var escMonitor: Any?
     private var hotkeyTestTimeout: Timer?
     private var hotkeyTestPressDetected = false
+    /// 点按开关模式：双击热键锁定连续听写，无需一直按住。
+    /// 锁定期间 onPress/onRelease 都被旁路，单击（onShortTap）= 结束。
+    private var dictationLocked = false
+    private var lastShortTapAt: Date?
     /// 当前 capture / hotkey 是按哪份配置搭起来的，用来判断要不要真的重建。
     /// ⚠️ 没有它的话，词库页每加一个热词都会整体重启 AVAudioEngine + 重建 CGEventTap，
     ///   而 macOS 上「停掉引擎立刻新建再 start」是出了名的易失败时序
@@ -41,8 +45,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         session.onStateChange = { [weak self] st in
-            self?.updateStatusIcon(st)
-            self?.buildMenu()
+            guard let self else { return }
+            // 会话无论因何结束（松手/Esc/出错），锁定标志都必须跟着落下 ——
+            // 否则 Esc 取消后热键单击会被「锁定中，单击=结束」的分支吃掉
+            if st == .idle { self.dictationLocked = false }
+            self.updateStatusIcon(st)
+            self.buildMenu()
         }
 
         hotkey = makeHotkey()
@@ -195,6 +203,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.state.hotkeyTestMessage = "已检测到按下，请松开完成测试"
                     return
                 }
+                // 锁定模式下会话已经在跑，长按不该再开一轮（begin 的 guard 会
+                // 弹「正在收尾稍候」，那是误导 —— 用户只是手放上去了）
+                guard !self.dictationLocked else { return }
                 self.stopInputTest()
                 self.session.begin()
             }
@@ -209,7 +220,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         message: "已检测到 \(HotkeyManager.describe(self.state.appliedConfig))，热键可用")
                     return
                 }
+                guard !self.dictationLocked else { return }
                 self.session.end()
+            }
+        }
+        hk.onShortTap = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                guard !self.state.hotkeyTestRunning else { return }
+
+                // 锁定中：单击立即结束 —— 不需要等第二击，停止意图越快兑现越好
+                if self.dictationLocked {
+                    self.dictationLocked = false
+                    self.session.end()
+                    return
+                }
+                // 未锁定：400ms 内两次短按 = 锁定开始连续听写。
+                // 单次短按维持原语义（忽略，放行给系统的 ⌘C 等组合键）。
+                let now = Date()
+                if let last = self.lastShortTapAt, now.timeIntervalSince(last) < 0.4 {
+                    self.lastShortTapAt = nil
+                    self.stopInputTest()
+                    self.session.begin()
+                    // begin 可能因缺 Key/权限直接失败回 idle —— 只有真开起来才锁
+                    if self.state.isListening {
+                        self.dictationLocked = true
+                        self.hud.flash(message: "连续听写已开启 —— 再按一下 \(HotkeyManager.describe(self.state.appliedConfig)) 结束",
+                                       duration: 2.2)
+                    }
+                } else {
+                    self.lastShortTapAt = now
+                }
             }
         }
         hk.onHealthChanged = { [weak self] healthy in

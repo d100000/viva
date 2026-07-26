@@ -50,9 +50,17 @@ final class HotkeyManager {
     /// 因此也不能发 onRelease —— 否则轻点一下右⌘就会白开一次识别会话（真实计费）。
     private var pressDelivered = false
     private var holdTimer: DispatchWorkItem?
+    /// 单修饰键按住期间夹杂了其它按键（右⌘+C 这类组合键使用）。
+    /// ⚠️ 这种「按下-抬起」不是点按，绝不能算进双击判定 ——
+    ///   否则连按两次 ⌘C 复制就会误触发锁定、凭空开始录音（真实计费）。
+    private var sawOtherKeyWhileDown = false
 
     var onPress: (() -> Void)?
     var onRelease: (() -> Void)?
+    /// 短按（未达长按阈值）抬起时回调。长按/短按互斥：短按不会发 onPress/onRelease。
+    /// 点按开关模式（双击锁定连续听写）靠它做双击判定 —— 判定放在 AppDelegate，
+    /// 因为「锁定中单击立即结束」需要会话状态，这里只报告事实。
+    var onShortTap: (() -> Void)?
     var onHealthChanged: ((Bool) -> Void)?
 
     init(keyCode: Int64, modifierOnly: Bool, modifiers: UInt64, holdThresholdMs: Int) {
@@ -88,10 +96,12 @@ final class HotkeyManager {
     func start() -> Bool {
         stop()
 
-        // 单修饰键只需要 flagsChanged；组合键还要 keyDown/keyUp
+        // 单修饰键核心逻辑只需要 flagsChanged；组合键还要 keyDown/keyUp。
+        // 单修饰键模式也要看 keyDown —— 不是为了处理它（原样放行），
+        // 只为知道「按住期间有没有夹别的键」，把 右⌘+C 从点按判定里排除。
         var mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        mask |= CGEventMask(1 << CGEventType.keyDown.rawValue)
         if !modifierOnly {
-            mask |= CGEventMask(1 << CGEventType.keyDown.rawValue)
             mask |= CGEventMask(1 << CGEventType.keyUp.rawValue)
         }
 
@@ -165,6 +175,11 @@ final class HotkeyManager {
         let code = event.getIntegerValueField(.keyboardEventKeycode)
 
         if modifierOnly {
+            // 按住期间来的任何普通键 = 用户在打组合键，本次按住不算点按
+            if type == .keyDown {
+                if isDown { sawOtherKeyWhileDown = true }
+                return Unmanaged.passUnretained(event)
+            }
             guard type == .flagsChanged, code == keyCode else {
                 return Unmanaged.passUnretained(event)
             }
@@ -212,6 +227,7 @@ final class HotkeyManager {
         isDown = true
         downAt = Date()
         pressDelivered = false
+        sawOtherKeyWhileDown = false
         holdTimer?.cancel()
         Log.info("热键按下，等待 \(Int(holdThreshold * 1000))ms 长按阈值")
 
@@ -234,7 +250,12 @@ final class HotkeyManager {
         holdTimer?.cancel(); holdTimer = nil
 
         guard pressDelivered else {
-            Log.info("热键短按（\(Int(held * 1000))ms），未达 \(Int(holdThreshold * 1000))ms 阈值，忽略")
+            if sawOtherKeyWhileDown {
+                Log.info("热键短按但按住期间有其它按键（组合键使用），不算点按")
+            } else {
+                Log.info("热键短按（\(Int(held * 1000))ms），未达 \(Int(holdThreshold * 1000))ms 阈值")
+                DispatchQueue.main.async { self.onShortTap?() }
+            }
             return
         }
         pressDelivered = false
