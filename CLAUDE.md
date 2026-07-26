@@ -76,13 +76,14 @@ main.swift —— 入口 + --selftest 模式
 - **`enableNonstream`（二遍识别）与热词互斥**（3/3 复现）：开启后 `corpus.context` 热词失效。默认关闭 —— 热词是本项目差异化支点，不能牺牲。
 - **`endWindowSize` 必须小于说话的自然停顿**（300~600ms 安全区），否则逐句上屏退化成说完才一次性上屏。
 - **热键别用 Fn(63)**：微信输入法和豆包输入法都抢占了它。
+- **全局热键只依赖「辅助功能」，不依赖「输入监控」**：Viva 的 `HotkeyManager` 使用 `CGEvent.tapCreate(..., options: .defaultTap)`，这条路径由辅助功能（`AXIsProcessTrusted()`）授权。绝不能再用 `CGPreflightListenEventAccess()` 作为热键启动、健康检查或设置页状态的硬门槛，也不要引导用户开启输入监控；否则会把可用热键误判成不可用。普通组合热键还可使用 `RegisterEventHotKey`，同样无需输入监控，但 Viva 为支持单修饰键、按住/松开时序和吞键而采用 `.defaultTap`。
 - **resourceId 用 `volc.seedasr.sauc.duration`（2.0，1元/小时）**；1.0 的 `volc.bigasr.sauc.duration` 贵 4.5 倍。
 - **故意不做**退格回改已上屏文本 —— 算错一次会不可逆删掉用户自己的文字。
 - `LLMProvider.swift` 的服务商预设表是逐家核实官方文档得来的：各家关闭「深度思考」的参数写法都不同（`thinkingOff`），传错等于没关；模型名 churn 极快，一律做成可编辑字符串 + 建议列表，绝不写死。
 
 ## 已知坑
 
-- **TCC 授权绑定代码签名**，ad-hoc 签名每次编译都变 → 重新编译后热键失灵，需在「系统设置 → 隐私与安全性 → 辅助功能」移除再重新添加本 App；授权辅助功能后必须重启 App。
+- **TCC 授权绑定代码签名**，ad-hoc 签名每次编译都变 → 重新编译后热键失灵，需在「系统设置 → 隐私与安全性 → 辅助功能」移除再重新添加本 App。当前版本每 2 秒自动复查权限并补建热键监听，授权后不应要求用户重启 App。
 - **ad-hoc 签名 ⇒ 无法公证 ⇒ 下载的包必被 Gatekeeper 拦**，提示「已损坏」（误导人，其实只是没证书）。所以 `install.sh` 和 cask 的 `postflight` 都必须 `xattr -dr com.apple.quarantine`，这一步是承重的，删了用户就打不开 App。`spctl -a` 对本 App 永远返回 rejected，但 App 实际能正常启动 —— 别拿 spctl 当验证标准。
 - **`ditto -c -k` 别加 `--sequesterRsrc`**：那个参数是**生成** `__MACOSX/` 的元凶（Apple 公证文档里带它，那是给 notary service 用的）。本项目要给端用户干净的包，不加。
 - **`ps -eo comm=` 会按列宽截断路径**，只有 `ps -p <pid> -o comm=` 给完整路径；且它报物理路径（`/private/var/…`），跟符号链接路径比较前两边都要 `cd && pwd -P` 解析。install.sh 靠这个判断「该退掉的是不是正要被替换的那个进程」。

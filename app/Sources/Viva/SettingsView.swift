@@ -420,6 +420,8 @@ struct SettingsView: View {
                     .padding(6)
                 }
 
+                PermissionsSettingsSection(state: state)
+
                 MicrophoneSettingsSection(state: state)
 
                 GroupBox("按住说话的快捷键") {
@@ -829,6 +831,34 @@ struct SettingsView: View {
                                 NSWorkspace.shared.open(Config.configURL)
                             }
                         }
+
+                        Divider()
+
+                        // 排障时让用户「把日志发来」，没有这两行地址就是一句空话。
+                        Text("运行日志（自动轮转，最多保留约 4 MB）：")
+                            .font(.callout)
+                        Text(Log.fileURL.path)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary).textSelection(.enabled)
+                        Text("崩溃报告文件夹（自动清理 30 天前的）：")
+                            .font(.callout)
+                        Text(CrashReporter.dirURL.path)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary).textSelection(.enabled)
+                        HStack {
+                            Button("打开日志") {
+                                NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL])
+                            }
+                            Button("打开崩溃报告文件夹") {
+                                // 文件夹可能是空的（从没崩过），直接打开而不是选中
+                                NSWorkspace.shared.open(CrashReporter.dirURL)
+                            }
+                            if let last = CrashReporter.latestReport() {
+                                Button("查看上次崩溃") {
+                                    NSWorkspace.shared.activateFileViewerSelecting([last])
+                                }
+                            }
+                        }
                     }
                     .padding(6)
                 }
@@ -850,7 +880,8 @@ struct SettingsView: View {
                     Spacer()
                     VivaMark(size: 18)
                     VStack(alignment: .trailing, spacing: 1) {
-                        Text("Viva 0.3.0").font(.caption).foregroundStyle(.tertiary)
+                        Text("Viva \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+                            .font(.caption).foregroundStyle(.tertiary)
                         Text("Just say Viva")
                             .font(.system(size: 10, weight: .medium, design: .rounded))
                             .foregroundStyle(.tertiary)
@@ -860,6 +891,183 @@ struct SettingsView: View {
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+}
+
+// MARK: - 权限与状态
+
+private struct PermissionsSettingsSection: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        GroupBox("权限与状态") {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Label("后台自动检查", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let checkedAt = state.permissionLastCheckedAt {
+                        Text(checkedAt.formatted(date: .omitted, time: .standard))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                    Button {
+                        state.onRefreshPermissions?()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("立即重新检查权限")
+                }
+                .padding(.bottom, 7)
+
+                Divider()
+
+                PermissionStatusRow(
+                    ok: state.micGranted,
+                    icon: "mic.fill",
+                    title: "麦克风",
+                    detail: state.micGranted
+                        ? "已允许读取语音输入"
+                        : "未授权，无法录音和测试输入设备",
+                    actionTitle: state.micGranted ? nil : "前往开启",
+                    action: openMicrophonePrivacy)
+
+                Divider()
+
+                PermissionStatusRow(
+                    ok: state.axGranted,
+                    icon: "accessibility",
+                    title: "辅助功能",
+                    detail: state.axGranted
+                        ? "已允许全局热键和文字上屏"
+                        : "未授权；若列表中已开启，请移除旧 Viva 后重新添加当前版本",
+                    actionTitle: state.axGranted ? nil : "前往开启",
+                    action: HotkeyManager.openAccessibilitySettings)
+
+                Divider()
+
+                PermissionStatusRow(
+                    ok: state.hotkeyHealthy,
+                    icon: "command",
+                    title: "全局热键",
+                    detail: state.hotkeyStatus,
+                    actionTitle: hotkeyActionTitle,
+                    action: hotkeyAction)
+
+                HStack(spacing: 7) {
+                    if state.hotkeyTestRunning {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: hotkeyTestIcon)
+                            .foregroundStyle(hotkeyTestColor)
+                    }
+                    Text(state.hotkeyTestMessage)
+                        .font(.caption)
+                        .foregroundStyle(hotkeyTestColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+                .padding(.leading, 38)
+                .padding(.bottom, 7)
+            }
+            .padding(6)
+        }
+        .onAppear { state.onRefreshPermissions?() }
+        .onDisappear {
+            if state.hotkeyTestRunning { state.onHotkeyTestCancel?() }
+        }
+    }
+
+    private var hotkeyActionTitle: String? {
+        if state.hotkeyTestRunning { return "取消测试" }
+        if state.hotkeyHealthy { return "测试热键" }
+        if state.axGranted { return "重新注册" }
+        return nil
+    }
+
+    private var hotkeyTestIcon: String {
+        switch state.hotkeyTestResult {
+        case true: return "checkmark.circle.fill"
+        case false: return "xmark.circle.fill"
+        case nil: return "circle.dashed"
+        }
+    }
+
+    private var hotkeyTestColor: Color {
+        if state.hotkeyTestRunning { return .accentColor }
+        switch state.hotkeyTestResult {
+        case true: return .green
+        case false: return .orange
+        case nil: return .secondary
+        }
+    }
+
+    private func hotkeyAction() {
+        if state.hotkeyTestRunning {
+            state.onHotkeyTestCancel?()
+        } else if state.hotkeyHealthy {
+            state.onHotkeyTestStart?()
+        } else {
+            state.onRefreshPermissions?()
+        }
+    }
+
+    private func openMicrophonePrivacy() {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+private struct PermissionStatusRow: View {
+    let ok: Bool
+    let icon: String
+    let title: String
+    let detail: String
+    let actionTitle: String?
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(ok ? Color.green.opacity(0.14) : Color.orange.opacity(0.14))
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(ok ? Color.green : Color.orange)
+            }
+            .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 12)
+
+            if let actionTitle {
+                Button(actionTitle, action: action)
+                    .fixedSize()
+            } else if ok {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .help("检查通过")
+            } else {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(.orange)
+                    .help("尚未通过检查")
+            }
+        }
+        .padding(.vertical, 8)
+    }
 }
 
 // MARK: - 麦克风输入

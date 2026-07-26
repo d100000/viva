@@ -17,6 +17,13 @@ final class AppState: ObservableObject {
     @Published var secureInputOn = false
     @Published var hotkeyHealthy = false
     @Published var audioEngineReady = false
+    @Published var hotkeyStatus = "尚未检查"
+    @Published var permissionLastCheckedAt: Date?
+
+    // ── 热键实测 ──
+    @Published var hotkeyTestRunning = false
+    @Published var hotkeyTestResult: Bool?
+    @Published var hotkeyTestMessage = "尚未测试实际按键"
 
     // ── 音频输入设备 ──
     @Published var audioInputDevices: [AudioInputDevice] = []
@@ -89,6 +96,9 @@ final class AppState: ObservableObject {
     var onRefreshInputDevices: (() -> Void)?
     var onInputTestStart: (() -> Void)?
     var onInputTestStop: (() -> Void)?
+    var onRefreshPermissions: (() -> Void)?
+    var onHotkeyTestStart: (() -> Void)?
+    var onHotkeyTestCancel: (() -> Void)?
 
     private var permTimer: Timer?
 
@@ -96,7 +106,14 @@ final class AppState: ObservableObject {
         refreshPermissions()
         // 权限会在系统设置里被改，也可能因重新签名而失效，必须轮询
         permTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshPermissions() }
+            Task { @MainActor in
+                guard let self else { return }
+                if let refresh = self.onRefreshPermissions {
+                    refresh()
+                } else {
+                    self.refreshPermissions()
+                }
+            }
         }
     }
 
@@ -104,6 +121,7 @@ final class AppState: ObservableObject {
         micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         axGranted = AXIsProcessTrusted()
         secureInputOn = TextInjector.isSecureInputEnabled
+        permissionLastCheckedAt = Date()
     }
 
     /// ⚠️ 必须含 hotkeyHealthy。原来不含它，导致「启动后才授予辅助功能」时

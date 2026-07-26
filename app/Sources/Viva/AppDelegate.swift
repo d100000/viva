@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let mainWindow = MainWindowController()
     private let welcome = WelcomeWindowController()
     private var escMonitor: Any?
+    private var hotkeyTestTimeout: Timer?
+    private var hotkeyTestPressDetected = false
     /// 当前 capture / hotkey 是按哪份配置搭起来的，用来判断要不要真的重建。
     /// ⚠️ 没有它的话，词库页每加一个热词都会整体重启 AVAudioEngine + 重建 CGEventTap，
     ///   而 macOS 上「停掉引擎立刻新建再 start」是出了名的易失败时序
@@ -20,6 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.accessory)      // 菜单栏 App，不进 Dock
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        Log.info("===== Viva 启动 version=\(version) pid=\(ProcessInfo.processInfo.processIdentifier) =====")
+        Log.info("运行路径：\(Bundle.main.bundlePath)；日志：\(Log.fileURL.path)")
         installMainMenu()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -54,7 +59,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onRefreshInputDevices = { [weak self] in self?.refreshInputDevices() }
         state.onInputTestStart = { [weak self] in self?.startInputTest() }
         state.onInputTestStop = { [weak self] in self?.stopInputTest() }
+        state.onRefreshPermissions = { [weak self] in self?.checkPermissionsAndHotkey() }
+        state.onHotkeyTestStart = { [weak self] in self?.startHotkeyTest() }
+        state.onHotkeyTestCancel = { [weak self] in self?.cancelHotkeyTest() }
         refreshInputDevices()
+        checkPermissionsAndHotkey(forceRetry: true)
 
         escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] ev in
             if ev.keyCode == 53 { Task { @MainActor in self?.session.abort() } }
@@ -85,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ n: Notification) {
+        cancelHotkeyTest(resetMessage: false)
         stopInputTest()
         hotkey?.stop()
         capture?.stopEngine()
@@ -171,7 +181,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.state.lastError = "麦克风初始化失败：\(error.localizedDescription)"
                     Log.error(self.state.lastError)
                 }
-                self.setupHotkey()
             }
         }
     }
@@ -180,57 +189,147 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hk = HotkeyManager(config: state.config)
         hk.onPress = { [weak self] in
             Task { @MainActor in
-                self?.stopInputTest()
-                self?.session.begin()
+                guard let self else { return }
+                if self.state.hotkeyTestRunning {
+                    self.hotkeyTestPressDetected = true
+                    self.state.hotkeyTestMessage = "已检测到按下，请松开完成测试"
+                    return
+                }
+                self.stopInputTest()
+                self.session.begin()
             }
         }
         hk.onRelease = { [weak self] in
-            Task { @MainActor in self?.session.end() }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.state.hotkeyTestRunning {
+                    guard self.hotkeyTestPressDetected else { return }
+                    self.finishHotkeyTest(
+                        success: true,
+                        message: "已检测到 \(HotkeyManager.describe(self.state.appliedConfig))，热键可用")
+                    return
+                }
+                self.session.end()
+            }
         }
         hk.onHealthChanged = { [weak self] healthy in
             Task { @MainActor in
-                self?.state.hotkeyHealthy = healthy
-                self?.buildMenu()
+                guard let self else { return }
+                self.state.hotkeyHealthy = healthy
+                self.state.hotkeyStatus = healthy
+                    ? "全局热键监听正常"
+                    : "热键监听被系统停用，后台正在恢复"
+                if !healthy, self.state.hotkeyTestRunning {
+                    self.finishHotkeyTest(success: false,
+                                          message: "测试中监听被系统停用，请重新检查权限")
+                }
+                self.buildMenu()
             }
         }
         return hk
     }
 
-    private func setupHotkey() {
+    /// 后台权限检查的统一入口。
+    ///
+    /// 权限恢复后自动补建 CGEventTap；授权被撤销时拆掉旧监听。
+    /// 创建失败也不会永久卡死，AppState 的 2 秒轮询会继续重试。
+    private func checkPermissionsAndHotkey(forceRetry: Bool = false) {
+        let previousAX = state.axGranted
+        let previousHealthy = state.hotkeyHealthy
+        let previousStatus = state.hotkeyStatus
+
         state.refreshPermissions()
-        guard HotkeyManager.hasAccessibilityPermission else {
-            _ = HotkeyManager.promptForAccessibility()
+
+        if forceRetry || previousAX != state.axGranted {
+            Log.info("辅助功能权限：\(state.axGranted ? "已授权" : "未授权")")
+        }
+
+        guard state.axGranted else {
+            if state.hotkeyTestRunning {
+                finishHotkeyTest(success: false, message: "辅助功能权限不可用")
+            }
+            if state.hotkeyHealthy { hotkey.stop() }
             state.hotkeyHealthy = false
-            buildMenu()
-            // 用户可能稍后才在系统设置里授权。轮询到授权后自动把热键补注册上，
-            // 否则 UI 会显示「就绪」但 CGEventTap 根本不存在（静默失败）。
-            scheduleHotkeyRetry()
+            state.hotkeyStatus = "辅助功能未授权；若列表中已开启，请移除旧 Viva 后重新添加"
+            if previousAX != state.axGranted || previousHealthy != state.hotkeyHealthy
+                || previousStatus != state.hotkeyStatus {
+                buildMenu()
+            }
             return
         }
-        state.hotkeyHealthy = hotkey.start()
-        // ⚠️ 就绪提示**不要**走悬浮条。悬浮条只在识别过程中出现，
-        //    平时屏幕上不该有任何浮层。就绪状态在菜单栏和主界面里已经有了。
-        if !state.hotkeyHealthy {
-            state.lastError = "热键注册失败，检查辅助功能权限"
+
+        if forceRetry, state.hotkeyHealthy {
+            hotkey.stop()
+            state.hotkeyHealthy = false
         }
-        buildMenu()
+
+        if !state.hotkeyHealthy {
+            state.hotkeyHealthy = hotkey.start()
+            state.hotkeyStatus = state.hotkeyHealthy
+                ? "全局热键监听正常"
+                : "系统拒绝创建热键监听，后台将在 2 秒后重试"
+            Log.info("权限检查后热键注册\(state.hotkeyHealthy ? "成功" : "失败")")
+        } else {
+            state.hotkeyStatus = "全局热键监听正常"
+        }
+
+        if previousAX != state.axGranted || previousHealthy != state.hotkeyHealthy
+            || previousStatus != state.hotkeyStatus {
+            buildMenu()
+        }
     }
 
-    private var hotkeyRetry: Timer?
+    // MARK: - 热键实测
 
-    private func scheduleHotkeyRetry() {
-        hotkeyRetry?.invalidate()
-        hotkeyRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
+    private func startHotkeyTest() {
+        checkPermissionsAndHotkey()
+        guard state.hotkeyHealthy else {
+            state.hotkeyTestResult = false
+            state.hotkeyTestMessage = "热键监听未就绪，请先处理上方权限"
+            return
+        }
+        guard session.state == .idle else {
+            state.hotkeyTestResult = false
+            state.hotkeyTestMessage = "语音输入正在进行，请结束后再测试"
+            return
+        }
+
+        stopInputTest()
+        Log.info("开始热键测试：\(HotkeyManager.describe(state.appliedConfig))")
+        hotkeyTestTimeout?.invalidate()
+        hotkeyTestPressDetected = false
+        state.hotkeyTestRunning = true
+        state.hotkeyTestResult = nil
+        state.hotkeyTestMessage = "请按住 \(HotkeyManager.describe(state.appliedConfig))，然后松开"
+
+        hotkeyTestTimeout = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) {
+            [weak self] _ in
             Task { @MainActor in
-                guard let self else { t.invalidate(); return }
-                guard HotkeyManager.hasAccessibilityPermission else { return }
-                t.invalidate()
-                self.hotkeyRetry = nil
-                self.state.hotkeyHealthy = self.hotkey.start()
-                Log.info("检测到辅助功能已授权，热键补注册\(self.state.hotkeyHealthy ? "成功" : "失败")")
-                self.buildMenu()
+                guard let self, self.state.hotkeyTestRunning else { return }
+                self.finishHotkeyTest(success: false,
+                                      message: "10 秒内没有检测到热键，请检查按键配置或权限")
             }
         }
+    }
+
+    private func cancelHotkeyTest(resetMessage: Bool = true) {
+        hotkeyTestTimeout?.invalidate()
+        hotkeyTestTimeout = nil
+        hotkeyTestPressDetected = false
+        state.hotkeyTestRunning = false
+        if resetMessage {
+            state.hotkeyTestResult = nil
+            state.hotkeyTestMessage = "已取消热键测试"
+        }
+    }
+
+    private func finishHotkeyTest(success: Bool, message: String) {
+        hotkeyTestTimeout?.invalidate()
+        hotkeyTestTimeout = nil
+        hotkeyTestPressDetected = false
+        state.hotkeyTestRunning = false
+        state.hotkeyTestResult = success
+        state.hotkeyTestMessage = message
     }
 
     private func reloadConfig() {
@@ -275,14 +374,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             || old!.holdThresholdMs != new.holdThresholdMs
 
         if hotkeyChanged {
+            cancelHotkeyTest(resetMessage: false)
             // 先把可能还在跑的会话收干净，否则 hotkey.stop() 补发的 onRelease
             // 会打到即将被替换掉的 session 上，旧会话的 WebSocket 变成孤儿继续计费
             if session.state != .idle { session.abort() }
             hotkey.stop()
             hotkey = makeHotkey()
-            if HotkeyManager.hasAccessibilityPermission {
-                state.hotkeyHealthy = hotkey.start()
-            }
+            state.hotkeyHealthy = false
+            checkPermissionsAndHotkey(forceRetry: true)
         }
 
         // ── 其余配置（热词、识别参数、润色、上屏方式）直接推给现有会话 ──
@@ -319,6 +418,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startInputTest() {
         guard !state.audioInputTestRunning else { return }
+        if state.hotkeyTestRunning {
+            cancelHotkeyTest()
+        }
         guard state.micGranted else {
             state.audioInputError = "需要先在系统设置中允许 Viva 使用麦克风"
             return

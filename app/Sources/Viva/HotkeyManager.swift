@@ -119,6 +119,11 @@ final class HotkeyManager {
         runLoopSource = src
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         CGEvent.tapEnable(tap: t, enable: true)
+        guard CGEvent.tapIsEnabled(tap: t) else {
+            Log.error("CGEventTap 创建后未能启用")
+            stop()
+            return false
+        }
 
         // ⭐「non-nil tap is not a healthy tap」——系统会静默禁用 tap，
         //   必须周期性校验，否则「用了一阵子热键就不灵了」。
@@ -164,6 +169,7 @@ final class HotkeyManager {
                 return Unmanaged.passUnretained(event)
             }
             let down = (event.flags.rawValue & deviceMask) != 0
+            Log.info("收到热键 flagsChanged：keyCode=\(code) down=\(down) flags=0x\(String(event.flags.rawValue, radix: 16))")
             if down, !isDown { firePress() } else if !down, isDown { fireRelease() }
             return Unmanaged.passUnretained(event)   // 单修饰键不吞
         }
@@ -207,12 +213,14 @@ final class HotkeyManager {
         downAt = Date()
         pressDelivered = false
         holdTimer?.cancel()
+        Log.info("热键按下，等待 \(Int(holdThreshold * 1000))ms 长按阈值")
 
         // 按住超过阈值才真正开始录音。这样用右⌘按系统快捷键（右⌘+C 等）
         // 或手滑碰一下，都不会建 WebSocket、不会产生请求和计费。
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isDown, !self.pressDelivered else { return }
             self.pressDelivered = true
+            Log.info("热键长按生效")
             self.onPress?()
         }
         holdTimer = work
@@ -226,10 +234,11 @@ final class HotkeyManager {
         holdTimer?.cancel(); holdTimer = nil
 
         guard pressDelivered else {
-            Log.debug("短按（\(Int(held * 1000))ms），未达 \(Int(holdThreshold * 1000))ms 阈值，忽略")
+            Log.info("热键短按（\(Int(held * 1000))ms），未达 \(Int(holdThreshold * 1000))ms 阈值，忽略")
             return
         }
         pressDelivered = false
+        Log.info("热键松开，持续 \(Int(held * 1000))ms")
         DispatchQueue.main.async { self.onRelease?() }
     }
 
