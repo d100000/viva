@@ -80,6 +80,23 @@ struct Config: Codable {
     /// 只把最终整段结果上屏（不逐句）。默认 false = 边说边逐句上屏。
     var commitOnlyAtEnd: Bool = false
 
+    // ── 连续听写（方案见 09-连续听写技术方案.md） ──
+    /// 稳定前缀逐段上屏：连续说话不留停顿时，服务端永远不判停（判停唯一依据是
+    /// 静音 ≥ endWindowSize），文字会全部憋到松手。开启后把 partial 里
+    /// 「以标点收尾、连续多帧未变、距尾部有安全边距」的前缀提前写进光标处。
+    /// ⚠️ 润色开启时自动失效 —— 润色要拿全文重写，与逐段上屏互斥。
+    var progressiveCommit: Bool = true
+    /// partial 达到多少字才启用逐段提交（短句走原有 definite 流程）
+    var progressiveMinLength: Int = 20
+    /// 候选前缀需要连续多少帧保持不变
+    var progressiveStableFrames: Int = 3
+    /// 提交点距 partial 尾部的最小字素数 —— 服务端的修订几乎都发生在尾部
+    var progressiveTailGuard: Int = 8
+    /// 会话年龄超过该秒数后，借下一个 definite 的干净边界轮转新会话（T2）
+    var rotateAfterSeconds: Int = 50
+    /// 一直没有 definite 时强制轮转的上限秒数（T3），应大于 rotateAfterSeconds
+    var hardRotateSeconds: Int = 75
+
     // ── LLM 润色 ──
 
     var enablePolish: Bool = false
@@ -170,6 +187,12 @@ struct Config: Codable {
         useClipboardPaste = b(.useClipboardPaste, def.useClipboardPaste)
         clipboardRestoreDelayMs = i(.clipboardRestoreDelayMs, def.clipboardRestoreDelayMs)
         commitOnlyAtEnd = b(.commitOnlyAtEnd, def.commitOnlyAtEnd)
+        progressiveCommit = b(.progressiveCommit, def.progressiveCommit)
+        progressiveMinLength = i(.progressiveMinLength, def.progressiveMinLength)
+        progressiveStableFrames = i(.progressiveStableFrames, def.progressiveStableFrames)
+        progressiveTailGuard = i(.progressiveTailGuard, def.progressiveTailGuard)
+        rotateAfterSeconds = i(.rotateAfterSeconds, def.rotateAfterSeconds)
+        hardRotateSeconds = i(.hardRotateSeconds, def.hardRotateSeconds)
         enablePolish = b(.enablePolish, def.enablePolish)
         polishProvider = s(.polishProvider, def.polishProvider)
         polishThinkingOff = s(.polishThinkingOff, def.polishThinkingOff)

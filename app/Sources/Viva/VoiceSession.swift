@@ -70,6 +70,11 @@ final class VoiceSession {
     /// 历史记录里的「仅复制」角标要靠它才准。
     private var didFallbackToClipboard = false
 
+    /// 连续听写：稳定前缀逐段上屏（09 号方案路线 B）。
+    /// nil = 本会话不启用（配置关闭，或 deferCommit 模式 —— 润色要拿全文重写，互斥）。
+    /// ⚠️ begin() 时按快照决定，会话中途改配置不影响本轮（同 deferCommitSnapshot 的理由）。
+    private var partialCommitter: PartialCommitter?
+
     init(config: Config, capture: AudioCapture, hud: HUDController) {
         self.config = config
         self.capture = capture
@@ -145,6 +150,8 @@ final class VoiceSession {
         polishSnapshot = config.polishReady
         polishConfigSnapshot = config
         deferCommitSnapshot = testMode || config.commitOnlyAtEnd || polishSnapshot
+        partialCommitter = (config.progressiveCommit && !deferCommitSnapshot)
+            ? PartialCommitter(config: config) : nil
         targetBundleId = TextInjector.frontmostBundleId
         targetAppName = NSWorkspace.shared.frontmostApplication?.localizedName
         startedAt = Date()
@@ -312,8 +319,22 @@ final class VoiceSession {
             committedText += u.newDefinite
             if deferCommit {
                 pendingCommit += u.newDefinite
+            } else if partialCommitter != nil {
+                // 连续听写：这个 definite 的前缀可能已经被逐段提交过了，只补尾巴
+                injectSentence(partialCommitter!.consumeDefinite(u.newDefinite))
             } else {
                 injectSentence(u.newDefinite)  // 逐句上屏 —— 边说边打字
+            }
+        }
+
+        // 连续听写：从 partial 里挑「稳定 + 标点收尾 + 距尾部有余量」的前缀提前上屏。
+        // 必须在 consumeDefinite 之后喂 —— definite 到达意味着 partial 尾巴换了上下文，
+        // consumeDefinite 已把稳定性历史清掉，这里从新尾巴重新积累。
+        if partialCommitter != nil, !u.partial.isEmpty {
+            let increment = partialCommitter!.feed(partialTail: u.partial)
+            if !increment.isEmpty {
+                Log.debug("逐段提交 \(increment.count) 字：\(increment)")
+                injectSentence(increment)
             }
         }
 
@@ -342,7 +363,20 @@ final class VoiceSession {
         let tail = trailing.trimmingCharacters(in: .whitespacesAndNewlines)
         if !tail.isEmpty {
             committedText += tail
-            if deferCommit { pendingCommit += tail } else { injectSentence(tail) }
+            if deferCommit {
+                pendingCommit += tail
+            } else if partialCommitter != nil {
+                // ⚠️ 对账必须用未 trim 的原文 —— 逐段提交时 feed 计的字素数
+                //   是按原始 partial 算的，trim 过再对账会错位。注入前再 trim 尾巴。
+                let remainder = partialCommitter!.consumeDefinite(trailing)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                injectSentence(remainder)
+            } else {
+                injectSentence(tail)
+            }
+        } else if partialCommitter != nil {
+            // 尾巴为空也要清余额：轮转后的新会话不能背着旧账
+            _ = partialCommitter!.consumeDefinite(trailing)
         }
 
         if let s = startedAt {
