@@ -68,7 +68,7 @@ struct LLMProvider: Identifiable, Hashable {
             id: relayID,
             // 名字要短 —— 选择器只有 220pt 宽，长名字会被截成「…」，
             // 卖点写在下面的 hint 里，不要塞进选项名
-            name: "Viva 中转站（推荐）",
+            name: "Viva 中转站（一个 Key 通国内外）",
             baseURL: "https://bobdong.cn/v1",
             models: [],                    // 空表 → 由「拉取模型」在线获取，永不过期
             thinkingOff: .thinkingDisabled,
@@ -93,7 +93,7 @@ struct LLMProvider: Identifiable, Hashable {
         ),
         LLMProvider(
             id: "deepseek",
-            name: "DeepSeek",
+            name: "DeepSeek（推荐 · 国产）",
             baseURL: "https://api.deepseek.com",
             models: [
                 .init(id: "deepseek-v4-flash", note: "首选 · 便宜快"),

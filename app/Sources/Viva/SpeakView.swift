@@ -631,16 +631,25 @@ private struct PolishSetupPopover: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 6) {
                 Image(systemName: "sparkles").foregroundStyle(.tint)
-                Text("还差一个润色模型").font(.system(size: 13, weight: .semibold))
+                Text("还差一个模型").font(.system(size: 13, weight: .semibold))
             }
-            Text("润色要调一个大模型。挨家云厂商注册的话，实名、充值、开通模型、抄模型名，一套下来十几分钟；用 **Viva 中转站**的话，国内外的模型共用一个 Key，填进去点「拉取模型」就自动配好了。")
+            Text("推荐国产 **DeepSeek V4 Flash** —— 快、便宜（一句话不到一厘钱），注册简单不用海外支付。点下面一键配好服务商和模型，去拿个 API Key 填进设置即可。想要国内外模型共用一个 Key，也可以用 **Viva 中转站**。")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(width: 300, alignment: .leading)
+                .frame(width: 310, alignment: .leading)
 
             HStack(spacing: 8) {
-                Button("去拿一个 Key") {
-                    if let u = URL(string: LLMProvider.relaySite) {
+                Button("一键按 DeepSeek 配置") {
+                    // 地址/协议/端点/模型一次配平,只留 Key 要填 —— 字段错任何一个都是 404
+                    AppState.shared.commitField {
+                        $0.polishProvider = "deepseek"
+                        $0.polishBaseURL = "https://api.deepseek.com"
+                        $0.polishAPIFormat = "openai-chat"
+                        $0.polishPath = "/chat/completions"
+                        $0.polishModel = "deepseek-v4-flash"
+                    }
+                    AppState.shared.onReloadConfig?()
+                    if let u = URL(string: "https://platform.deepseek.com/api_keys") {
                         NSWorkspace.shared.open(u)
                     }
                     NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
@@ -648,7 +657,16 @@ private struct PolishSetupPopover: View {
                 }
                 .buttonStyle(.borderedProminent).controlSize(.small)
 
-                Button("已经有 Key 了") {
+                Button("用 Viva 中转站") {
+                    if let u = URL(string: LLMProvider.relaySite) {
+                        NSWorkspace.shared.open(u)
+                    }
+                    NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
+                    onDone()
+                }
+                .controlSize(.small)
+
+                Button("已有 Key") {
                     NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
                     onDone()
                 }
