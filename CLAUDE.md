@@ -11,7 +11,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-# 编译 + 组装 .app + ad-hoc 签名（只有 Command Line Tools 也能跑）
+# 首次:生成固定自签证书（让 TCC 授权跨更新存活，只需跑一次；幂等）
+cd app && ./make-signing-cert.sh
+
+# 编译 + 组装 .app + 签名（优先固定自签证书，无证书才回退 ad-hoc；只有 Command Line Tools 也能跑）
 cd app && ./build.sh          # 产物: app/dist/Viva.app
 ./build.sh debug              # debug 构建
 
@@ -85,8 +88,8 @@ main.swift —— 入口 + --selftest 模式
 
 ## 已知坑
 
-- **TCC 授权绑定代码签名**，ad-hoc 签名每次编译都变 → 重新编译后热键失灵，需在「系统设置 → 隐私与安全性 → 辅助功能」移除再重新添加本 App。当前版本每 2 秒自动复查权限并补建热键监听，授权后不应要求用户重启 App。
-- **ad-hoc 签名 ⇒ 无法公证 ⇒ 下载的包必被 Gatekeeper 拦**，提示「已损坏」（误导人，其实只是没证书）。所以 `install.sh` 和 cask 的 `postflight` 都必须 `xattr -dr com.apple.quarantine`，这一步是承重的，删了用户就打不开 App。`spctl -a` 对本 App 永远返回 rejected，但 App 实际能正常启动 —— 别拿 spctl 当验证标准。
+- **TCC 授权绑定代码签名身份的「指定要求(DR)」**。已改用固定自签证书 `Viva Self-Signed`（`make-signing-cert.sh` 生成，`build.sh` 自动选用）→ DR = `certificate leaf` 指纹，重编译/换版本都不变 → **授权跨更新存活，不必再删了重加**。校验方式：`codesign -d -r- App` 看 designated，两次构建应一致；`codesign -dvv App` 应显示 `Authority=Viva Self-Signed`（若显示 `Signature=adhoc` 说明证书丢了、回退了 ad-hoc，跑一次 `make-signing-cert.sh` 即可）。私钥与其传输密码备份在仓库外的 `~/.config/viva/signing/`（`viva-signing.p12` + `viva-signing.p12.pass`，密码随机生成、绝不入库），**换机器/重装系统前把这两个文件一起拷走**再在新机跑 `make-signing-cert.sh` 即可恢复同一张证书；丢了则只能重建，会要求重新授权一次。历史坑：ad-hoc 签名每次编译都变 → 那时重编后热键失灵需在辅助功能里移除再添加；固定证书后此问题消除。当前版本仍每 2 秒自动复查权限并补建热键监听。
+- **自签/ad-hoc 签名 ⇒ 无法公证 ⇒ 下载的包仍被 Gatekeeper 拦**，提示「已损坏」（误导人，其实只是没 Apple 证书链）。固定自签证书解决的是 TCC 重复授权，**不解决** Gatekeeper——那需要 Developer ID + 公证（$99/年，将来 `export VIVA_SIGN_IDENTITY="Developer ID Application: …"` 即可切换，build.sh 无需改）。所以 `install.sh` 和 cask 的 `postflight` 仍必须 `xattr -dr com.apple.quarantine`，这一步是承重的，删了用户就打不开 App。`spctl -a` 对本 App 永远返回 rejected，但 App 实际能正常启动 —— 别拿 spctl 当验证标准。
 - **`ditto -c -k` 别加 `--sequesterRsrc`**：那个参数是**生成** `__MACOSX/` 的元凶（Apple 公证文档里带它，那是给 notary service 用的）。本项目要给端用户干净的包，不加。
 - **`ps -eo comm=` 会按列宽截断路径**，只有 `ps -p <pid> -o comm=` 给完整路径；且它报物理路径（`/private/var/…`），跟符号链接路径比较前两边都要 `cd && pwd -P` 解析。install.sh 靠这个判断「该退掉的是不是正要被替换的那个进程」。
 - 豆包错误码：`45000001` 协议/参数非法；`45000081` 建连后太久没喂音频。排障带上启动时打印的 `logid`。

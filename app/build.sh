@@ -29,12 +29,22 @@ else
 fi
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 
-# ad-hoc 签名。
-# ⚠️ 辅助功能/麦克风的 TCC 授权是绑定代码签名身份的，而 ad-hoc 签名会随二进制内容变化，
-#    所以每次重新编译后，系统设置里的授权可能失效 —— 表现为「热键突然不灵了」。
-#    解决办法：在「系统设置 → 隐私与安全性 → 辅助功能」里把本应用**移除再重新添加**。
-echo "▸ 签名（ad-hoc）…"
-codesign --force --sign - --timestamp=none "${APP_DIR}" 2>/dev/null
+# 代码签名。TCC 授权(辅助功能/麦克风)绑定的是签名身份的「指定要求(DR)」:
+#   - 固定证书签名 → DR = certificate leaf 指纹,换版本、重编译都不变 → 授权跨更新存活。
+#   - ad-hoc 签名  → DR = cdhash(这一份二进制的哈希),一重编译就变 → 每次都要重新授权。
+# 身份优先级:环境变量 VIVA_SIGN_IDENTITY > 固定自签证书「Viva Self-Signed」> ad-hoc 兜底。
+# 还没有自签证书?先跑一次:./make-signing-cert.sh
+# 将来换 Developer ID:导入付费证书后 export VIVA_SIGN_IDENTITY="Developer ID Application: 名字 (TEAMID)"，本脚本无需改。
+SIGN_IDENTITY="${VIVA_SIGN_IDENTITY:-Viva Self-Signed}"
+if security find-certificate -c "${SIGN_IDENTITY}" >/dev/null 2>&1; then
+  echo "▸ 签名（${SIGN_IDENTITY}，固定身份 → 授权可跨更新保留）…"
+  codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${APP_DIR}"
+else
+  echo "▸ 签名（ad-hoc 兜底）…"
+  echo "  ⚠️ 未找到证书「${SIGN_IDENTITY}」，回退 ad-hoc：每次重编后 TCC 授权都会失效。"
+  echo "     根治:先跑 ./make-signing-cert.sh 生成固定自签证书，再重新构建。"
+  codesign --force --sign - --timestamp=none "${APP_DIR}" 2>/dev/null
+fi
 
 echo
 echo "✅ 完成：${PWD}/${APP_DIR}"
