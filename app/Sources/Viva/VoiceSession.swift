@@ -75,6 +75,25 @@ final class VoiceSession {
     /// ⚠️ begin() 时按快照决定，会话中途改配置不影响本轮（同 deferCommitSnapshot 的理由）。
     private var partialCommitter: PartialCommitter?
 
+    // ── 会话轮转（09 号方案路线 C）——
+    // 单一 WebSocket 会话有服务端最大时长，说得久会被强制收流。
+    // 把「被动被掐报错」变成「主动轮转无感续接」：
+    //   T1 服务端自己收流（asyncFinal 但用户还按着）→ handleFinished 里自动续
+    //   T2 会话年龄 > rotateAfterSeconds 且刚来一个 definite → 借干净边界轮转
+    //   T3 年龄 > hardRotateSeconds 一直没 definite → 等音量谷值强切（+3s 兜底）
+    /// 当前 ASR 会话的建立时刻（轮转判据）
+    private var asrStartedAt: Date?
+    /// 已发起轮转、老会话正在收尾。此间音频进 rotationBuffer 而不是老会话
+    private var rotationDraining = false
+    /// 老会话收尾期间的续接音频缓冲。上限 64 包（≈12.8s，老会话收尾有 6s 兜底，
+    /// 实际到不了一半）；真溢出时丢最旧的 —— 丢最新的会吃掉用户正在说的话
+    private var rotationBuffer: [Data] = []
+    /// 本轮按住期间已轮转次数（日志/排障用）
+    private var rotationCount = 0
+    /// T3 已到时限，等一个音量谷值作为刀口
+    private var wantRotateDip = false
+    private var rotateTimer: Timer?
+
     init(config: Config, capture: AudioCapture, hud: HUDController) {
         self.config = config
         self.capture = capture
@@ -83,7 +102,17 @@ final class VoiceSession {
         capture.onChunk = { [weak self] chunk in
             Task { @MainActor in
                 guard let self, self.state == .listening else { return }
-                self.asr?.send(audio: chunk)
+                if self.rotationDraining {
+                    // 轮转窗口期：老会话已发末包不再收音频，新会话还没建 ——
+                    // 先囤着，continueRotation 时一次性 flush，一个字都不丢
+                    if self.rotationBuffer.count >= 64 {
+                        Log.warn("轮转续接缓冲已满，丢弃最早的音频包")
+                        self.rotationBuffer.removeFirst()
+                    }
+                    self.rotationBuffer.append(chunk)
+                } else {
+                    self.asr?.send(audio: chunk)
+                }
                 self.addBilled(chunk.count)
             }
         }
@@ -100,6 +129,10 @@ final class VoiceSession {
                 if self.state != .idle { self.hud.update(level: level) }
                 if self.state == .listening, self.firstVoiceAt == nil, level > 0.06 {
                     self.firstVoiceAt = Date()
+                }
+                // T3：到了强切时限，挑一个音量谷值下刀，尽量别劈在字中间
+                if self.wantRotateDip, level < 0.08 {
+                    self.initiateRotation(reason: "T3 音量谷值")
                 }
             }
         }
@@ -173,18 +206,19 @@ final class VoiceSession {
         app.lastSentenceMs = nil
         app.isListening = true
 
-        let client = DoubaoStreamingASR(config: config)
-        client.onUpdate = { [weak self] u in
-            Task { @MainActor in self?.handle(u) }
+        rotationDraining = false
+        rotationBuffer = []
+        rotationCount = 0
+        wantRotateDip = false
+
+        startASRClient()
+        guard let client = asr else { return }   // startASRClient 必然赋值，防御
+
+        // T3 看门狗：一直没 definite 也不能让会话老死在服务端手里
+        rotateTimer?.invalidate()
+        rotateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.rotateTick() }
         }
-        client.onError = { [weak self] msg in
-            Task { @MainActor in self?.handleError(msg) }
-        }
-        client.onFinished = { [weak self] trailing in
-            Task { @MainActor in self?.handleFinished(trailing) }
-        }
-        asr = client
-        client.start()
 
         state = .listening
         onStateChange?(state)
@@ -222,6 +256,11 @@ final class VoiceSession {
 
     func end() {
         guard state == .listening else { return }
+        if rotationDraining {
+            // 罕见边角：恰好在轮转窗口期松手。老会话已发末包收不了新音频，
+            // 新会话还没建 —— 缓冲里这一小段（≤6s）没有去处，只能丢弃并留痕。
+            Log.warn("在轮转窗口期松手，续接缓冲 \(rotationBuffer.count) 包未能上送")
+        }
         let tail = capture.stopCapturing()
         if !tail.isEmpty {
             asr?.send(audio: tail)
@@ -268,7 +307,92 @@ final class VoiceSession {
         state = .idle
         app.isListening = false
         app.level = 0
+        rotateTimer?.invalidate(); rotateTimer = nil
+        rotationDraining = false
+        rotationBuffer = []
+        wantRotateDip = false
         onStateChange?(state)
+    }
+
+    // MARK: - 会话轮转
+
+    /// 建一个新的 ASR 会话并接管 asr 引用。begin() 和 continueRotation 共用 ——
+    /// 首包参数（热词、判停窗口…）只有这一条代码路径，轮转不会漏配置。
+    private func startASRClient() {
+        let client = DoubaoStreamingASR(config: config)
+        client.onUpdate = { [weak self] u in
+            Task { @MainActor in self?.handle(u) }
+        }
+        client.onError = { [weak self] msg in
+            Task { @MainActor in self?.handleError(msg) }
+        }
+        client.onFinished = { [weak self] trailing in
+            Task { @MainActor in self?.handleFinished(trailing) }
+        }
+        asr = client
+        client.start()
+        asrStartedAt = Date()
+    }
+
+    private var asrAgeSeconds: Double {
+        asrStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+    }
+
+    private func rotateTick() {
+        guard state == .listening, !rotationDraining, !testMode else { return }
+        let age = asrAgeSeconds
+        if age > Double(config.hardRotateSeconds + 3) {
+            // 等谷值等了 3 秒都没等到（一直大声说）—— 只能硬切，好过被服务端掐
+            initiateRotation(reason: "T3 超时兜底（\(Int(age))s）")
+        } else if age > Double(config.hardRotateSeconds) {
+            wantRotateDip = true   // 谷值刀口由 onLevel 回调触发
+        }
+    }
+
+    /// 发起主动轮转：给老会话发末包。它的最终 definite/trailing 会照常从
+    /// handle()/handleFinished 流回来，后者发现「用户还按着」就接 continueRotation。
+    private func initiateRotation(reason: String) {
+        guard state == .listening, !rotationDraining, !testMode else { return }
+        // 幼年会话不轮转：也是熔断的一半 —— 见 handleFinished 里的 8 秒判据
+        guard asrAgeSeconds >= 8 else { return }
+        Log.info("发起会话轮转（\(reason)，会话年龄 \(Int(asrAgeSeconds))s）")
+        rotationDraining = true
+        wantRotateDip = false
+        asr?.finish()
+    }
+
+    /// 老会话已收尾、用户还按着 —— 注入尾巴、起新会话、flush 续接缓冲。
+    private func continueRotation(trailing: String) {
+        rotationCount += 1
+        rotationDraining = false
+        wantRotateDip = false
+
+        let tail = trailing.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty {
+            committedText += tail
+            if deferCommit {
+                pendingCommit += tail
+            } else if partialCommitter != nil {
+                let remainder = partialCommitter!.consumeDefinite(trailing)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                injectSentence(remainder)
+            } else {
+                injectSentence(tail)
+            }
+        }
+        // 无条件复位：新会话的 partial 是全新上下文，旧余额必须清零
+        //（正常路径 consumeDefinite 已清，这里兜的是 trailing 为空/异常的边角）
+        partialCommitter?.reset()
+
+        app.committed = committedText
+        app.partial = ""
+        if !testMode { hud.update(committed: committedText, partial: "") }
+
+        startASRClient()
+        // 轮转窗口期囤下的音频按序补发。计费在 onChunk 里已经记过，不重复记
+        for chunk in rotationBuffer { asr?.send(audio: chunk) }
+        Log.info("会话轮转 #\(rotationCount) 完成，续接缓冲补发 \(rotationBuffer.count) 包")
+        rotationBuffer.removeAll()
     }
 
     // MARK: - 流式结果
@@ -341,6 +465,13 @@ final class VoiceSession {
         app.committed = committedText
         app.partial = u.partial
         if !testMode { hud.update(committed: committedText, partial: u.partial) }
+
+        // T2：会话上了年纪，又刚好来了一个 definite —— 这是最干净的轮转边界
+        //（definite 意味着服务端刚判停，此刻的 partial 尾巴最短、损失最小）
+        if !u.newDefinite.isEmpty, !rotationDraining,
+           asrAgeSeconds > Double(config.rotateAfterSeconds) {
+            initiateRotation(reason: "T2 definite 边界")
+        }
     }
 
     // MARK: - 收尾
@@ -357,6 +488,18 @@ final class VoiceSession {
         // 服务端可能在用户还在说话时就结束流（VAD 强制收流 / 最大时长 / asyncFinal）。
         // 这时后半段会静默蒸发 —— 竞品「系统自动吞掉我一部分话」就是这个。
         let interrupted = state == .listening
+
+        // ── T1/T2/T3 汇聚点 ──
+        // 会话结束了但用户还按着 → 无缝轮转续接，而不是报错让用户重说。
+        // 不论是我们主动发起（T2/T3 的 initiateRotation）还是服务端强制收流（T1），
+        // 都从这里走。⚠️ 必须在停采集之前 —— 轮转期间麦克风一刻都不能停。
+        // ≥8s 熔断：会话建立不到 8 秒就被结束，说明服务端在赶我们
+        //（配额耗尽/鉴权失效），再轮转就是死循环，落回终止路径亮出真实状态。
+        if interrupted, !testMode, asrAgeSeconds >= 8 {
+            continueRotation(trailing: trailing)
+            return
+        }
+
         if capture.isCapturing { _ = capture.stopCapturing() }
 
         // 还没定稿但已经识别出来的尾巴也要算上，否则用户会丢字
