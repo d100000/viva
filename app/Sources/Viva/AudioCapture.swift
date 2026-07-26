@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreAudio
+import AudioToolbox
 
 /// 麦克风采集：设备原生格式 → 16kHz / 16bit / 单声道 PCM，按 200ms 分包。
 ///
@@ -11,7 +12,7 @@ import CoreAudio
 ///    热键按下瞬间把这段一并送出。这是「不吃掉你的前三个字」的实现。
 final class AudioCapture {
 
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private var converter: AVAudioConverter?
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                           sampleRate: 16000,
@@ -28,7 +29,10 @@ final class AudioCapture {
     private var preRollMaxBytes: Int
 
     private(set) var isCapturing = false
+    private(set) var isTesting = false
     private(set) var isRunning = false
+    private var selectedInputUID: String
+    private var runningDeviceIsBluetooth = false
     /// ⚠️ 必须持有并在 stopEngine 里移除。原来直接丢弃返回的 token，
     ///   而 rebuild() 内部又会调 prewarm() 再注册一个 —— 观察者数量会
     ///   随每次设备变化 2^N 翻倍，插拔几次耳机就能把主线程卡死。
@@ -38,9 +42,12 @@ final class AudioCapture {
     var onChunk: ((Data) -> Void)?
     /// 实时音量 0...1，用于 HUD 波形
     var onLevel: ((Float) -> Void)?
+    /// 本地麦克风测试的音量，不参与识别和计费
+    var onTestLevel: ((Float) -> Void)?
 
-    init(preRollMs: Int) {
+    init(preRollMs: Int, inputDeviceUID: String = "") {
         preRollMaxBytes = 16000 * 2 * max(0, preRollMs) / 1000
+        selectedInputUID = inputDeviceUID
     }
 
     // MARK: - 权限
@@ -64,7 +71,7 @@ final class AudioCapture {
 
     // MARK: - 引擎
 
-    /// 当前默认输入设备是不是蓝牙。
+    /// 当前选择的输入设备是不是蓝牙。
     ///
     /// ⚠️ 这个判断决定了要不要常驻预热，而它关系到一个**比竞品更严重**的问题：
     /// 打开输入设备会把 AirPods 从 A2DP（高音质单向）拉到 HFP/SCO（双向通话），
@@ -75,57 +82,53 @@ final class AudioCapture {
     /// 所以：蓝牙设备下放弃常驻预热，改成按下热键才启动。
     /// 首字的损失由 preRoll 之外的即时启动补偿（蓝牙本来就有 SCO 建链延迟，
     /// 常驻预热在这类设备上收益也有限）。
-    static var defaultInputIsBluetooth: Bool {
-        var deviceID = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
-                                         &addr, 0, nil, &size, &deviceID) == noErr,
-              deviceID != 0 else { return false }
-
-        var transport = UInt32(0)
-        var tsize = UInt32(MemoryLayout<UInt32>.size)
-        var taddr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyTransportType,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        guard AudioObjectGetPropertyData(deviceID, &taddr, 0, nil, &tsize, &transport) == noErr
-        else { return false }
-
-        return transport == kAudioDeviceTransportTypeBluetooth
-            || transport == kAudioDeviceTransportTypeBluetoothLE
-    }
-
     /// 现在**能不能开始录音**。注意这和 `isRunning` 不是一回事。
     ///
     /// ⚠️ 蓝牙路径下引擎是**故意不常驻**的（常驻会把耳机永久拉进 HFP 通话模式，
     ///   音乐变成打电话音质），要等按下热键才由 `startCapturing()` 即时启动。
     ///   所以这种情况下 `isRunning == false` 是**预期状态，不是故障** ——
     ///   调用方绝不能拿 `isRunning` 当「就绪」判据去拦录音，否则蓝牙耳机用户
-    ///   每次按热键都会被拦下，还会收到一句方向完全错误的「麦克风权限」报错，
-    ///   而 startCapturing 里那段专为蓝牙写的回退永远走不到。
-    var canStart: Bool { isRunning || Self.defaultInputIsBluetooth }
+    ///   每次按热键都会被拦下。这里按“所选设备仍在线”判断，非蓝牙引擎若因
+    ///   热插拔停掉，下一次 startCapturing() 也能即时重启并自恢复。
+    var canStart: Bool {
+        (try? AudioInputDevices.resolve(uid: selectedInputUID)) != nil
+    }
 
     /// App 启动时调用一次。引擎从此常驻，`isCapturing` 只控制数据往不往外送。
     ///
     /// - Parameter force: 忽略蓝牙判断强行预热（热键按下时用）
     func prewarm(force: Bool = false) throws {
-        if !force, Self.defaultInputIsBluetooth {
-            Log.info("默认输入是蓝牙设备，跳过常驻预热 —— 避免把耳机永久拉进 HFP 通话模式（音乐会变成打电话音质）")
+        let device = try AudioInputDevices.resolve(uid: selectedInputUID)
+        if !force, device.isBluetooth {
+            Log.info("输入设备「\(device.name)」是蓝牙设备，跳过常驻预热 —— 避免把耳机永久拉进 HFP 通话模式")
             return
         }
         guard !isRunning else { return }
 
         let input = engine.inputNode
+        guard let audioUnit = input.audioUnit else {
+            throw NSError(domain: "AudioCapture", code: -3, userInfo: [
+                NSLocalizedDescriptionKey: "无法访问 Core Audio 输入单元"])
+        }
+        var deviceID = device.deviceID
+        let setStatus = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size))
+        guard setStatus == noErr else {
+            throw NSError(domain: "AudioCapture", code: Int(setStatus), userInfo: [
+                NSLocalizedDescriptionKey: "无法切换到「\(device.name)」（Core Audio \(setStatus)）"])
+        }
+
         let inFormat = input.outputFormat(forBus: 0)
         guard inFormat.sampleRate > 0 else {
             throw NSError(domain: "AudioCapture", code: -1, userInfo: [
                 NSLocalizedDescriptionKey: "拿不到输入设备格式（麦克风被占用或无可用输入设备）"])
         }
-        Log.info("输入设备格式：\(Int(inFormat.sampleRate))Hz \(inFormat.channelCount)ch")
+        Log.info("输入设备：\(device.name)（\(device.connectionLabel)）· \(Int(inFormat.sampleRate))Hz \(inFormat.channelCount)ch")
 
         guard let conv = AVAudioConverter(from: inFormat, to: outFormat) else {
             throw NSError(domain: "AudioCapture", code: -2, userInfo: [
@@ -153,6 +156,7 @@ final class AudioCapture {
         engine.prepare()
         try engine.start()
         isRunning = true
+        runningDeviceIsBluetooth = device.isBluetooth
     }
 
     private var rebuildRetries = 0
@@ -163,7 +167,7 @@ final class AudioCapture {
             // 设备刚切换时 CoreAudio 常常还没稳定（采样率会短暂返回 0），
             // 立刻重建大概率失败 —— 失败要能重试，否则一次抖动就永久失效，
             // 而且报给用户的原因还是错的（竞品那条「其他应用正在录音」就是这么来的）。
-            try prewarm(force: true)
+            try prewarm(force: isCapturing || isTesting)
             rebuildRetries = 0
             // ⚠️ 必须把 audioEngineReady 置回 true。它在下面重试耗尽时被置 false，
             //   而全项目只有 AppDelegate 的启动流程会置 true（只跑一次）——
@@ -207,6 +211,7 @@ final class AudioCapture {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         isRunning = false
+        runningDeviceIsBluetooth = false
     }
 
     deinit {
@@ -223,10 +228,29 @@ final class AudioCapture {
         }
     }
 
+    /// 切换输入硬件。设备 UID 为空时恢复为“跟随系统默认”。
+    /// 蓝牙设备只校验可用性，不常驻启动；实际录音或测试时再按需启动。
+    func setInputDevice(uid: String, shouldPrewarm: Bool = true) throws {
+        guard !isCapturing else {
+            throw NSError(domain: "AudioCapture", code: -4, userInfo: [
+                NSLocalizedDescriptionKey: "正在录音，无法切换输入设备"])
+        }
+        if isTesting { stopTesting() }
+        stopEngine()
+        engine = AVAudioEngine()
+        converter = nil
+        selectedInputUID = uid
+
+        // 即使没有麦克风权限，也先校验这个 UID 仍对应一台在线输入设备。
+        _ = try AudioInputDevices.resolve(uid: uid)
+        if shouldPrewarm { try prewarm() }
+    }
+
     // MARK: - 录音开关
 
     /// 开始录音。返回预缓冲里攒下的音频（热键按下之前的那 400ms），应当作为第一批发出去。
     func startCapturing() -> Data {
+        if isTesting { stopTesting() }
         // 蓝牙路径下引擎是不常驻的，按下热键才启动。
         // 代价是没有 preRoll，但换来的是耳机不会被长期拉进通话模式。
         if !isRunning {
@@ -249,12 +273,44 @@ final class AudioCapture {
 
     /// 停止录音，返回残留的不足一包的尾巴
     func stopCapturing() -> Data {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         isCapturing = false
         let tail = pending
         pending.removeAll(keepingCapacity: true)
         preRoll.removeAll(keepingCapacity: true)
+        lock.unlock()
+        if runningDeviceIsBluetooth { stopEngine() }
         return tail
+    }
+
+    // MARK: - 本地输入测试
+
+    func startTesting() throws {
+        guard !isCapturing else {
+            throw NSError(domain: "AudioCapture", code: -5, userInfo: [
+                NSLocalizedDescriptionKey: "正在进行语音输入，暂时不能测试麦克风"])
+        }
+        guard !isTesting else { return }
+        if !isRunning { try prewarm(force: true) }
+        guard isRunning else {
+            throw NSError(domain: "AudioCapture", code: -6, userInfo: [
+                NSLocalizedDescriptionKey: "输入设备启动失败"])
+        }
+
+        lock.lock()
+        pending.removeAll(keepingCapacity: true)
+        preRoll.removeAll(keepingCapacity: true)
+        isTesting = true
+        lock.unlock()
+    }
+
+    func stopTesting() {
+        lock.lock()
+        isTesting = false
+        pending.removeAll(keepingCapacity: true)
+        preRoll.removeAll(keepingCapacity: true)
+        lock.unlock()
+        if runningDeviceIsBluetooth { stopEngine() }
     }
 
     // MARK: - 处理
@@ -288,10 +344,9 @@ final class AudioCapture {
         for i in 0..<n { let s = Double(ch[0][i]) / 32768.0; sum += s * s }
         let rms = Float((sum / Double(max(n, 1))).squareRoot())
         let level = min(1, max(0, rms * 6))
-        DispatchQueue.main.async { self.onLevel?(level) }
-
         var ready: [Data] = []
         lock.lock()
+        let testing = isTesting
         if isCapturing {
             pending.append(data)
             while pending.count >= chunkBytes {
@@ -305,6 +360,11 @@ final class AudioCapture {
             }
         }
         lock.unlock()
+
+        DispatchQueue.main.async {
+            self.onLevel?(level)
+            if testing { self.onTestLevel?(level) }
+        }
 
         for chunk in ready { onChunk?(chunk) }
     }

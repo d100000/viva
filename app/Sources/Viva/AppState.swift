@@ -18,6 +18,13 @@ final class AppState: ObservableObject {
     @Published var hotkeyHealthy = false
     @Published var audioEngineReady = false
 
+    // ── 音频输入设备 ──
+    @Published var audioInputDevices: [AudioInputDevice] = []
+    @Published var audioInputDevicesLoading = false
+    @Published var audioInputTestRunning = false
+    @Published var audioInputTestLevel: Float = 0
+    @Published var audioInputError = ""
+
     // ── 实时识别 ──
     @Published var isListening = false
     @Published var committed = ""
@@ -79,6 +86,9 @@ final class AppState: ObservableObject {
     var onTestStart: (() -> Void)?
     var onTestStop: (() -> Void)?
     var onReloadConfig: (() -> Void)?
+    var onRefreshInputDevices: (() -> Void)?
+    var onInputTestStart: (() -> Void)?
+    var onInputTestStop: (() -> Void)?
 
     private var permTimer: Timer?
 

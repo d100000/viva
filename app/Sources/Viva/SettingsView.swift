@@ -420,6 +420,8 @@ struct SettingsView: View {
                     .padding(6)
                 }
 
+                MicrophoneSettingsSection(state: state)
+
                 GroupBox("按住说话的快捷键") {
                     VStack(alignment: .leading, spacing: 10) {
                         HotkeyRecorderField(state: state)
@@ -858,9 +860,225 @@ struct SettingsView: View {
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+}
+
+// MARK: - 麦克风输入
+
+private struct MicrophoneSettingsSection: View {
+    @ObservedObject var state: AppState
+
+    private var defaultDevice: AudioInputDevice? {
+        state.audioInputDevices.first(where: \.isDefault)
     }
 
-    // MARK: - 中转站 / 模型列表
+    private var selectedDeviceAvailable: Bool {
+        state.config.inputDeviceUID.isEmpty
+            ? defaultDevice != nil
+            : state.audioInputDevices.contains(where: { $0.uid == state.config.inputDeviceUID })
+    }
+
+    private var systemDefaultTitle: String {
+        guard let device = defaultDevice else { return "系统默认" }
+        return "系统默认 — \(device.name)"
+    }
+
+    private var levelText: String {
+        guard state.audioInputTestRunning else { return "等待测试" }
+        switch state.audioInputTestLevel {
+        case ..<0.025: return "等待声音"
+        case ..<0.12: return "声音偏小"
+        case ..<0.72: return "声音正常"
+        default: return "声音较强"
+        }
+    }
+
+    var body: some View {
+        GroupBox("麦克风输入") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Text("输入设备")
+                        .frame(width: 92, alignment: .leading)
+
+                    Picker("", selection: Binding(
+                        get: { state.config.inputDeviceUID },
+                        set: selectDevice)) {
+                        Text(systemDefaultTitle).tag("")
+                        Divider()
+                        ForEach(state.audioInputDevices) { device in
+                            Text(devicePickerLabel(device)).tag(device.uid)
+                        }
+                        if !state.config.inputDeviceUID.isEmpty,
+                           !state.audioInputDevices.contains(where: {
+                               $0.uid == state.config.inputDeviceUID
+                           }) {
+                            Text("设备不可用（已断开）").tag(state.config.inputDeviceUID)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 410)
+                    .disabled(state.isListening)
+
+                    Button {
+                        state.onRefreshInputDevices?()
+                    } label: {
+                        Group {
+                            if state.audioInputDevicesLoading {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                        }
+                        .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(state.audioInputDevicesLoading || state.isListening)
+                    .help("刷新输入设备")
+
+                    Spacer()
+                }
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    Image(systemName: state.audioInputTestRunning
+                          ? "waveform" : "mic")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(state.audioInputTestRunning
+                                         ? Color.accentColor : Color.secondary)
+                        .frame(width: 20)
+
+                    InputLevelMeter(level: state.audioInputTestLevel,
+                                    active: state.audioInputTestRunning)
+                        .frame(height: 14)
+
+                    Text("\(Int(state.audioInputTestLevel * 100))%")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, alignment: .trailing)
+
+                    Text(levelText)
+                        .font(.caption)
+                        .foregroundStyle(state.audioInputTestRunning
+                                         ? levelColor(state.audioInputTestLevel)
+                                         : Color.secondary)
+                        .frame(width: 62, alignment: .leading)
+
+                    Button {
+                        if state.audioInputTestRunning {
+                            state.onInputTestStop?()
+                        } else {
+                            state.onInputTestStart?()
+                        }
+                    } label: {
+                        Label(state.audioInputTestRunning ? "停止" : "测试麦克风",
+                              systemImage: state.audioInputTestRunning
+                                ? "stop.fill" : "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(state.audioInputTestRunning ? Color.red : Color.accentColor)
+                    .disabled(!state.micGranted || !selectedDeviceAvailable || state.isListening)
+                    .fixedSize()
+                }
+
+                if !state.micGranted {
+                    HStack(spacing: 8) {
+                        Label("Viva 没有麦克风权限", systemImage: "mic.slash.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                        Button("打开系统设置") { openMicrophonePrivacy() }
+                            .buttonStyle(.link)
+                        Spacer()
+                    }
+                } else if !state.audioInputError.isEmpty {
+                    Label(state.audioInputError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Label(state.audioInputTestRunning
+                          ? "正在本地监听输入电平，音频不会发送到识别服务"
+                          : "测试只读取本地音量，不连接识别服务",
+                          systemImage: state.audioInputTestRunning
+                            ? "waveform.circle.fill" : "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(6)
+        }
+        .onAppear { state.onRefreshInputDevices?() }
+        .onDisappear { state.onInputTestStop?() }
+        .onChange(of: state.micGranted) { _, granted in
+            if !granted { state.onInputTestStop?() }
+        }
+    }
+
+    private func selectDevice(_ uid: String) {
+        guard uid != state.config.inputDeviceUID else { return }
+        state.onInputTestStop?()
+        state.commitField { $0.inputDeviceUID = uid }
+        state.onReloadConfig?()
+    }
+
+    private func devicePickerLabel(_ device: AudioInputDevice) -> String {
+        let defaultMark = device.isDefault ? " · 当前默认" : ""
+        return "\(device.name) · \(device.connectionLabel)\(defaultMark)"
+    }
+
+    private func levelColor(_ level: Float) -> Color {
+        if level >= 0.88 { return .red }
+        if level >= 0.72 { return .orange }
+        return level < 0.025 ? .secondary : .green
+    }
+
+    private func openMicrophonePrivacy() {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+private struct InputLevelMeter: View {
+    let level: Float
+    let active: Bool
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.secondary.opacity(0.16))
+                Capsule()
+                    .fill(meterColor)
+                    .frame(width: active
+                           ? max(2, geometry.size.width * CGFloat(min(1, max(0, level))))
+                           : 0)
+                HStack(spacing: 0) {
+                    Spacer()
+                    Rectangle().fill(Color(nsColor: .windowBackgroundColor).opacity(0.7))
+                        .frame(width: 1)
+                    Spacer()
+                    Rectangle().fill(Color(nsColor: .windowBackgroundColor).opacity(0.7))
+                        .frame(width: 1)
+                    Spacer()
+                }
+                .clipShape(Capsule())
+            }
+        }
+        .animation(.linear(duration: 0.06), value: level)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("麦克风输入音量")
+        .accessibilityValue(active ? "\(Int(level * 100))%" : "未测试")
+    }
+
+    private var meterColor: Color {
+        if level >= 0.88 { return .red }
+        if level >= 0.72 { return .orange }
+        return .green
+    }
+}
+
+// MARK: - 中转站 / 模型列表
 
     /// 换服务商时统一走这里。两个入口（服务商下拉、「用中转站配置」按钮）都必须调它。
     ///

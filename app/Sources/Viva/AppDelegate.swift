@@ -26,8 +26,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusIcon(.idle)
         buildMenu()
 
-        capture = AudioCapture(preRollMs: state.config.preRollMs)
+        capture = AudioCapture(preRollMs: state.config.preRollMs,
+                               inputDeviceUID: state.config.inputDeviceUID)
         session = VoiceSession(config: state.config, capture: capture, hud: hud)
+        capture.onTestLevel = { [weak self] level in
+            guard let self, self.state.audioInputTestRunning else { return }
+            if abs(self.state.audioInputTestLevel - level) > 0.01 {
+                self.state.audioInputTestLevel = level
+            }
+        }
         session.onStateChange = { [weak self] st in
             self?.updateStatusIcon(st)
             self?.buildMenu()
@@ -38,9 +45,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.appliedConfig = state.config
 
         // UI 上的「按住这里说话」与「保存并应用」回调
-        state.onTestStart = { [weak self] in self?.session.begin(testMode: true) }
+        state.onTestStart = { [weak self] in
+            self?.stopInputTest()
+            self?.session.begin(testMode: true)
+        }
         state.onTestStop = { [weak self] in self?.session.end() }
         state.onReloadConfig = { [weak self] in self?.reloadConfig() }
+        state.onRefreshInputDevices = { [weak self] in self?.refreshInputDevices() }
+        state.onInputTestStart = { [weak self] in self?.startInputTest() }
+        state.onInputTestStop = { [weak self] in self?.stopInputTest() }
+        refreshInputDevices()
 
         escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] ev in
             if ev.keyCode == 53 { Task { @MainActor in self?.session.abort() } }
@@ -71,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ n: Notification) {
+        stopInputTest()
         hotkey?.stop()
         capture?.stopEngine()
         HistoryStore.shared.saveNow()
@@ -164,7 +179,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeHotkey() -> HotkeyManager {
         let hk = HotkeyManager(config: state.config)
         hk.onPress = { [weak self] in
-            Task { @MainActor in self?.session.begin() }
+            Task { @MainActor in
+                self?.stopInputTest()
+                self?.session.begin()
+            }
         }
         hk.onRelease = { [weak self] in
             Task { @MainActor in self?.session.end() }
@@ -227,8 +245,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let old = appliedConfig
         appliedConfig = new
 
-        // ── 音频链路：改预缓冲时长只需换环形缓冲上限，不动设备 ──
+        // ── 音频链路 ──
         capture.setPreRoll(ms: new.preRollMs)
+        let inputDeviceChanged = old == nil || old!.inputDeviceUID != new.inputDeviceUID
+
+        if inputDeviceChanged {
+            stopInputTest()
+            if session.state != .idle { session.abort() }
+            do {
+                try capture.setInputDevice(uid: new.inputDeviceUID,
+                                           shouldPrewarm: state.micGranted)
+                state.audioEngineReady = state.micGranted && capture.canStart
+                state.audioInputError = ""
+                state.lastError = ""
+            } catch {
+                state.audioEngineReady = false
+                state.audioInputError = error.localizedDescription
+                state.lastError = "输入设备切换失败：\(error.localizedDescription)"
+                Log.error(state.lastError)
+            }
+            refreshInputDevices()
+        }
 
         // ── 热键：只有三要素（或长按阈值）变了才重建 CGEventTap ──
         let hotkeyChanged = old == nil
@@ -252,7 +289,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session.update(config: new)
 
         buildMenu()
-        Log.info("配置已重新加载（热键重建：\(hotkeyChanged ? "是" : "否")）")
+        Log.info("配置已重新加载（输入设备切换：\(inputDeviceChanged ? "是" : "否")，热键重建：\(hotkeyChanged ? "是" : "否")）")
+    }
+
+    // MARK: - 输入设备与本地测试
+
+    private func refreshInputDevices() {
+        state.audioInputDevicesLoading = true
+        defer { state.audioInputDevicesLoading = false }
+        do {
+            let devices = try AudioInputDevices.available()
+            state.audioInputDevices = devices
+            let selectedUID = state.config.inputDeviceUID
+            if devices.isEmpty {
+                state.audioInputError = "没有检测到可用的音频输入设备"
+            } else if selectedUID.isEmpty, !devices.contains(where: \.isDefault) {
+                state.audioInputError = "macOS 当前没有设置默认输入设备"
+            } else if !selectedUID.isEmpty,
+                      !devices.contains(where: { $0.uid == selectedUID }) {
+                state.audioInputError = "所选输入设备已断开，请重新选择"
+            } else if !state.audioInputTestRunning {
+                state.audioInputError = ""
+            }
+        } catch {
+            state.audioInputDevices = []
+            state.audioInputError = error.localizedDescription
+        }
+    }
+
+    private func startInputTest() {
+        guard !state.audioInputTestRunning else { return }
+        guard state.micGranted else {
+            state.audioInputError = "需要先在系统设置中允许 Viva 使用麦克风"
+            return
+        }
+        guard session.state == .idle else {
+            state.audioInputError = "语音输入正在进行，请结束后再测试麦克风"
+            return
+        }
+
+        do {
+            try capture.startTesting()
+            state.audioInputTestLevel = 0
+            state.audioInputTestRunning = true
+            state.audioInputError = ""
+            state.audioEngineReady = true
+        } catch {
+            state.audioInputTestRunning = false
+            state.audioInputTestLevel = 0
+            state.audioInputError = error.localizedDescription
+            state.audioEngineReady = false
+        }
+    }
+
+    private func stopInputTest() {
+        guard capture != nil else { return }
+        state.audioInputTestRunning = false
+        capture.stopTesting()
+        state.audioInputTestLevel = 0
     }
 
     // MARK: - 菜单栏

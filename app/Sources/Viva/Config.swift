@@ -66,6 +66,8 @@ struct Config: Codable {
     var holdThresholdMs: Int = 150
     /// 环形预缓冲时长(ms)：热键按下时把之前这么久的音频一并送出，解决首字丢失
     var preRollMs: Int = 400
+    /// Core Audio 设备 UID。留空表示始终跟随 macOS 的系统默认输入设备。
+    var inputDeviceUID: String = ""
 
     // ── 上屏 ──
     /// true = 剪贴板 + ⌘V（兼容性最好）；false = CGEvent 逐字键入
@@ -164,6 +166,7 @@ struct Config: Codable {
         hotkeyModifiers = (try? c.decodeIfPresent(UInt64.self, forKey: .hotkeyModifiers)).flatMap { $0 } ?? def.hotkeyModifiers
         holdThresholdMs = i(.holdThresholdMs, def.holdThresholdMs)
         preRollMs = i(.preRollMs, def.preRollMs)
+        inputDeviceUID = s(.inputDeviceUID, def.inputDeviceUID)
         useClipboardPaste = b(.useClipboardPaste, def.useClipboardPaste)
         clipboardRestoreDelayMs = i(.clipboardRestoreDelayMs, def.clipboardRestoreDelayMs)
         commitOnlyAtEnd = b(.commitOnlyAtEnd, def.commitOnlyAtEnd)
