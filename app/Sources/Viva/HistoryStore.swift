@@ -72,7 +72,7 @@ final class HistoryStore: ObservableObject {
 
     @Published private(set) var records: [VoiceRecord] = []
 
-    private let url = Config.configDir.appendingPathComponent("history.json")
+    private let url = Config.dataDir.appendingPathComponent("history.json")
     private var saveTask: Task<Void, Never>?
 
     private init() { load() }
@@ -111,7 +111,7 @@ final class HistoryStore: ObservableObject {
 
     func saveNow() {
         do {
-            try FileManager.default.createDirectory(at: Config.configDir,
+            try FileManager.default.createDirectory(at: Config.dataDir,
                                                     withIntermediateDirectories: true)
             let enc = JSONEncoder()
             enc.dateEncodingStrategy = .iso8601

@@ -90,9 +90,18 @@ struct SpeakView: View {
                     .frame(maxWidth: 620)
                     .padding(.horizontal, 32)
 
+                // ── 修改快捷键入口 ──
+                //   主页只做「说话」一件事，但「用哪个键说话」是用户最常想改的设置。
+                //   放一个显示当前热键、点一下就跳到设置对应处的小胶囊，省去翻设置页。
+                HotkeyChip(state: state) {
+                    state.pendingSettingsAnchor = "hotkey"
+                    NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
+                }
+                .padding(.top, 16)
+
                 // ── 极轻的状态栏 ──
                 FooterStats(store: store, state: state)
-                    .padding(.top, 18)
+                    .padding(.top, 12)
                     .padding(.bottom, 22)
             }
         }
@@ -608,6 +617,51 @@ private struct GlassButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .animation(.easeInOut(duration: 0.13), value: hovering)
+    }
+}
+
+// MARK: - 修改快捷键胶囊
+
+/// 主页底部的「快捷键」入口。
+/// 左侧把当前热键渲染成一枚 keycap（比纯文字更像「一个可按的键」），
+/// 右侧一句「修改」点明它可点。点一下跳到设置页并滚到热键那一节。
+private struct HotkeyChip: View {
+    @ObservedObject var state: AppState
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: "keyboard")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                // 当前热键做成一枚 keycap
+                Text(HotkeyManager.describe(state.config))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.primary.opacity(0.06)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.12)))
+                Text("修改")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.primary.opacity(hovering ? 0.07 : 0.0)))
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(hovering ? 0.12 : 0.06)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("修改「按住说话」的快捷键")
         .animation(.easeInOut(duration: 0.13), value: hovering)
     }
 }

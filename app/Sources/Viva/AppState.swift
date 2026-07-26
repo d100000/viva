@@ -11,6 +11,11 @@ final class AppState: ObservableObject {
     // ── 配置 ──
     @Published var config: Config = Config.load()
 
+    /// 跳进设置页后要滚到的锚点（如 "hotkey"）。设置页消费后自行清空。
+    /// 用它而不是纯通知：发起跳转时设置页往往还没挂载，通知会漏；
+    /// 存成状态后设置页 onAppear 也能补读到。
+    @Published var pendingSettingsAnchor: String?
+
     // ── 权限 ──
     @Published var micGranted = false
     @Published var axGranted = false

@@ -371,6 +371,7 @@ struct SettingsView: View {
     @State private var catalogTask: Task<Void, Never>?
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
 
@@ -456,6 +457,7 @@ struct SettingsView: View {
                     }
                     .padding(6)
                 }
+                .id("hotkey")   // 主页「修改快捷键」跳转的锚点
 
                 GroupBox("上屏节奏") {
                     VStack(alignment: .leading, spacing: 9) {
@@ -857,10 +859,17 @@ struct SettingsView: View {
                         Text("**大模型润色**：只有开启润色时才会发生，且只发送识别出的文本（不发音频），发往你在上面选的那家服务商。⚠️ 它是**默认服务商**：如果你没有换过，文本会经过 bobdong.cn 中转到目标模型 —— 该中转站由本项目作者运营，是本项目的收入来源。介意的话，换成任意其它服务商，或者选 Ollama 做完全本地的润色。\n另外：只有当你手动打开「把当前 App 名一并发给模型」时，请求里才会额外带上你所在 App 的名字；默认是关的。")
                             .font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("识别记录、配置、热词全部保存在本机：")
+                        Text("全部保存在本机这个目录下，已按类别分开存放 —— 顶层 `config.json` 才是配置，其余各归子目录，重置配置不会误伤历史/证书：")
                             .font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text(Config.configDir.path)
+                        Text("""
+                        \(Config.configDir.path)/
+                          ├─ config.json   配置（API Key、热词、各项设置）
+                          ├─ data/         识别历史
+                          ├─ logs/         运行日志
+                          ├─ crashes/      崩溃报告
+                          └─ signing/      代码签名证书备份（勿删）
+                        """)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(.secondary).textSelection(.enabled)
                         HStack {
@@ -931,7 +940,23 @@ struct SettingsView: View {
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-}
+        // 从主页「修改快捷键」进来：滚到热键那一节。
+        // onAppear 兜底（跳转时本页往往刚挂载，onChange 赶不上）。
+        .onAppear { consumePendingAnchor(proxy) }
+        .onChange(of: state.pendingSettingsAnchor) { _, _ in consumePendingAnchor(proxy) }
+        }
+    }
+
+    private func consumePendingAnchor(_ proxy: ScrollViewProxy) {
+        guard let anchor = state.pendingSettingsAnchor else { return }
+        // 略等一帧让内容完成布局，否则 onAppear 时滚动目标还没算出位置
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            withAnimation(.easeInOut(duration: 0.35)) {
+                proxy.scrollTo(anchor, anchor: .top)
+            }
+            state.pendingSettingsAnchor = nil
+        }
+    }
 
 // MARK: - 权限与状态
 

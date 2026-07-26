@@ -3,8 +3,7 @@ import Foundation
 enum Log {
     static var verbose = ProcessInfo.processInfo.environment["DOUBAO_VERBOSE"] != nil
 
-    static let fileURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/viva/viva.log")
+    static let fileURL = Config.logsDir.appendingPathComponent("viva.log")
 
     private static let maxFileBytes: UInt64 = 2 * 1024 * 1024
     private static let lock = NSLock()

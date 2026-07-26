@@ -227,6 +227,15 @@ struct Config: Codable {
         .appendingPathComponent(".config/viva", isDirectory: true)
     static let configURL = configDir.appendingPathComponent("config.json")
 
+    /// 按类别分开存放，别再全平铺在一个目录里 —— 否则「清空配置」会误伤历史/日志/证书。
+    ///   config.json  配置（顶层，唯一；重置/备份的最小单位就是它）
+    ///   data/        数据：history.json（识别历史）
+    ///   logs/        日志：viva.log（+ viva.previous.log）
+    ///   crashes/     崩溃报告（CrashReporter 管）
+    ///   signing/     代码签名证书备份（make-signing-cert.sh 管，勿删/勿入库）
+    static let dataDir = configDir.appendingPathComponent("data", isDirectory: true)
+    static let logsDir = configDir.appendingPathComponent("logs", isDirectory: true)
+
     /// 历代旧目录，按从新到旧的顺序找。
     /// 改目录必须配迁移 —— 否则用户的 API Key 和全部识别记录会「凭空消失」，
     /// 而且 load() 里是 try? 吞错误，连报错都看不到。
@@ -243,8 +252,14 @@ struct Config: Codable {
         //    另一代目录里的 history.json 就被永久丢弃了 —— 全部统计静默归零。
         var migrated: [String] = []
         try? fm.createDirectory(at: configDir, withIntermediateDirectories: true)
-        for name in ["config.json", "history.json"] {
-            let dst = configDir.appendingPathComponent(name)
+        try? fm.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        // 旧目录里是平铺的文件名，各自搬到新布局里的目标位置：
+        //   config.json 留顶层（配置），history.json 进 data/（数据）。
+        let dests: [(name: String, dst: URL)] = [
+            ("config.json",  configURL),
+            ("history.json", dataDir.appendingPathComponent("history.json")),
+        ]
+        for (name, dst) in dests {
             guard !fm.fileExists(atPath: dst.path) else { continue }
             guard let src = legacyDirs
                 .map({ $0.appendingPathComponent(name) })
@@ -271,8 +286,43 @@ struct Config: Codable {
         }
     }
 
+    /// 老版本（同名 viva 目录）把所有文件平铺在 ~/.config/viva/ 下。
+    /// 新版本按类别分子目录 —— 这里把遗留的平铺文件就地搬进新位置（幂等）。
+    ///
+    /// ⚠️ 必须与调用顺序无关。App 启动早期（本函数之前）可能已经写过日志，
+    ///   `logs/viva.log` 会被提前建出；若「目标已存在就跳过」，顶层那份旧日志就永远搬不进去、
+    ///   内容也并不进来。所以目标已存在时不跳过、也不覆盖，而是把旧文件改名保存
+    ///   （.premigration），既不丢内容又能清空顶层。
+    static func migrateLayoutIfNeeded() {
+        let fm = FileManager.default
+        let moves: [(from: URL, to: URL)] = [
+            (configDir.appendingPathComponent("history.json"),         dataDir.appendingPathComponent("history.json")),
+            (configDir.appendingPathComponent("history.corrupt.json"), dataDir.appendingPathComponent("history.corrupt.json")),
+            (configDir.appendingPathComponent("viva.log"),             logsDir.appendingPathComponent("viva.log")),
+            (configDir.appendingPathComponent("viva.previous.log"),    logsDir.appendingPathComponent("viva.previous.log")),
+        ]
+        guard moves.contains(where: { fm.fileExists(atPath: $0.from.path) }) else { return }
+        try? fm.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        var done: [String] = []
+        for m in moves where fm.fileExists(atPath: m.from.path) {
+            var dest = m.to
+            if fm.fileExists(atPath: dest.path) {
+                // 目标被早期写入抢先建出：改名保存旧文件，绝不覆盖、绝不丢内容。
+                let base = m.to.deletingPathExtension().lastPathComponent
+                let ext = m.to.pathExtension
+                let name = ext.isEmpty ? "\(base).premigration" : "\(base).premigration.\(ext)"
+                dest = m.to.deletingLastPathComponent().appendingPathComponent(name)
+                try? fm.removeItem(at: dest)
+            }
+            if (try? fm.moveItem(at: m.from, to: dest)) != nil { done.append(m.from.lastPathComponent) }
+        }
+        if !done.isEmpty { Log.info("已整理目录布局：\(done.joined(separator: "、")) 归入 data//logs/") }
+    }
+
     static func load() -> Config {
         migrateLegacyIfNeeded()
+        migrateLayoutIfNeeded()
         var cfg = Config()
 
         if let data = try? Data(contentsOf: configURL),

@@ -74,7 +74,18 @@ main.swift —— 入口 + --selftest 模式
 
 ### 配置
 
-`~/.config/viva/config.json`（权限 600），读取优先级：环境变量 > 文件 > 默认值。API Key 绝不写进源码。关键项见 `Config.swift` 内注释。
+配置根目录 `~/.config/viva/`，**按类别分开存放**（别再全平铺，否则「清空配置」会误伤历史/日志/证书）：
+
+```
+~/.config/viva/
+├── config.json     配置（API Key/热词/各项设置，权限 600，读取优先级：环境变量 > 文件 > 默认值）
+├── data/           识别历史 history.json（Config.dataDir）
+├── logs/           运行日志 viva.log（Config.logsDir）
+├── crashes/        崩溃报告（CrashReporter.dirURL）
+└── signing/        代码签名证书备份 viva-signing.p12 + .pass（make-signing-cert.sh，勿删/勿入库）
+```
+
+目录常量集中在 `Config.swift`（`configDir`/`dataDir`/`logsDir`）。改路径必须配迁移：`migrateLegacyIfNeeded()` 处理历代旧目录名（doubao-voice 等），`migrateLayoutIfNeeded()` 把旧版平铺的 history.json/viva.log 就地搬进 data//logs/（启动时自动、幂等）。API Key 绝不写进源码。
 
 ## 实测得出的硬约束（改参数前必读，都是踩过坑的）
 

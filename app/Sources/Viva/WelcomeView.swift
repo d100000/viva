@@ -49,6 +49,8 @@ struct WelcomeView: View {
     @ObservedObject var state = AppState.shared
     @State private var pressing = false
     @State private var keyDraft = ""
+    /// Key 输入框的呼吸高亮 —— 全流程唯一必须手动填写的东西，把视线拉过去
+    @State private var keyGlow = false
     var onFinish: () -> Void
 
     private var stepsDone: Int {
@@ -101,6 +103,23 @@ struct WelcomeView: View {
                             HStack {
                                 SecureField("控制台的 x-api-key", text: $keyDraft)
                                     .textFieldStyle(.roundedBorder)
+                                    // ⭐ 高亮：Key 是整个引导里唯一必须亲手填的东西。
+                                    //    未填之前套一圈呼吸的主色光环，把视线钉在这里。
+                                    .overlay {
+                                        if !state.config.hasCredentials {
+                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                .strokeBorder(
+                                                    Color.accentColor.opacity(keyGlow ? 0.95 : 0.4),
+                                                    lineWidth: 2)
+                                                .shadow(color: Color.accentColor
+                                                    .opacity(keyGlow ? 0.5 : 0.12),
+                                                        radius: keyGlow ? 7 : 2)
+                                                .animation(.easeInOut(duration: 1.1)
+                                                    .repeatForever(autoreverses: true),
+                                                           value: keyGlow)
+                                                .allowsHitTesting(false)
+                                        }
+                                    }
                                 Button("保存") {
                                     state.config.apiKey = keyDraft
                                         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -206,7 +225,7 @@ struct WelcomeView: View {
         }
         .frame(width: 520, height: 700)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear { keyDraft = state.config.apiKey }
+        .onAppear { keyDraft = state.config.apiKey; keyGlow = true }
     }
 
     private func openPrivacy(_ anchor: String) {
