@@ -98,6 +98,7 @@ main.swift —— 入口 + --selftest 模式
 - **热键别用 Fn(63)**：微信输入法和豆包输入法都抢占了它。
 - **全局热键只依赖「辅助功能」，不依赖「输入监控」**：Viva 的 `HotkeyManager` 使用 `CGEvent.tapCreate(..., options: .defaultTap)`，这条路径由辅助功能（`AXIsProcessTrusted()`）授权。绝不能再用 `CGPreflightListenEventAccess()` 作为热键启动、健康检查或设置页状态的硬门槛，也不要引导用户开启输入监控；否则会把可用热键误判成不可用。普通组合热键还可使用 `RegisterEventHotKey`，同样无需输入监控，但 Viva 为支持单修饰键、按住/松开时序和吞键而采用 `.defaultTap`。
 - **resourceId 用 `volc.seedasr.sauc.duration`（2.0，1元/小时）**；1.0 的 `volc.bigasr.sauc.duration` 贵 4.5 倍。
+- **dialog_ctx 的 `context_data` 元素必须是对象 `{"text": "…"}`**，传纯字符串数组服务端报 55000000 "fail to unmarshal corpusCtx"（实测得出，官方文档没写）。热词和 dialog_ctx 可共存于同一个 corpus.context 内层 JSON。验证方式：`VIVA_TEST_CTX=1 Viva --selftest 音频`。
 - **故意不做**退格回改已上屏文本 —— 算错一次会不可逆删掉用户自己的文字。
 - `LLMProvider.swift` 的服务商预设表是逐家核实官方文档得来的：各家关闭「深度思考」的参数写法都不同（`thinkingOff`），传错等于没关；模型名 churn 极快，一律做成可编辑字符串 + 建议列表，绝不写死。
 

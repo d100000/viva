@@ -106,6 +106,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         PasteLastHotkey.shared.register()
 
+        state.onResetHUDPosition = { [weak self] in
+            self?.hud.resetPosition()
+            self?.hud.flash(message: "悬浮条已恢复默认位置（跟随光标）", duration: 1.6)
+        }
+
         // 首次启动（或还没配好 Key）走欢迎引导；否则直接进主界面。
         // 无论走哪条，都必须开一个窗口 —— 菜单栏 App 什么都不弹的话，
         // 用户会以为「装了但没打开」。

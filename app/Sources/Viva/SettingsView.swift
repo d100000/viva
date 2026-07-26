@@ -654,9 +654,20 @@ struct SettingsView: View {
                         } icon: { Image(systemName: "infinity") }
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                        Divider()
+
+                        HStack(spacing: 10) {
+                            Button("恢复悬浮条默认位置") { state.onResetHUDPosition?() }
+                                .controlSize(.small)
+                            Text("悬浮条可以直接拖到任意位置固定；恢复后重新跟随光标。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     .padding(6)
                 }
+
+                AppProfileSection(state: state)
 
                 GroupBox("识别选项") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -695,6 +706,14 @@ struct SettingsView: View {
                         Label {
                             Text("enable_accelerate_text：服务端更激进地吐首字，实测能快 100~200ms，代价是开头个别字更容易识错。追求「按下就出字」的手感再开。")
                         } icon: { Image(systemName: "hare") }
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        Toggle("对话上下文（把最近几条识别结果带给服务端）",
+                               isOn: $state.config.enableDialogContext)
+                        Label {
+                            Text("连着说几段话时，服务端能接住上文语境，人名、术语的识别明显更稳。只发送**最近三条识别文本** —— 它们本来就是这家服务识别出来的，不产生新的数据暴露；不发送 App 名等任何额外信息。")
+                        } icon: { Image(systemName: "text.bubble") }
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -1145,6 +1164,134 @@ struct SettingsView: View {
             state.pendingSettingsAnchor = nil
         }
     }
+
+// MARK: - 按 App 自动切换（Profile）
+
+/// 竞品标配（VoiceInk / superwhisper / Wispr 的 Power Mode）：
+/// 在终端里关润色 + 逐字键入，在微信里开润色 + 剪贴板上屏。
+/// 会话开始时按目标 App 匹配，覆盖字段只影响那一次会话。
+private struct AppProfileSection: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        GroupBox("按 App 自动切换") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("给特定 App 单独定行为：在这些 App 里说话时，下面勾选的项覆盖全局设置，其余照旧。典型用法：终端/IDE 关润色、用逐字键入（不污染剪贴板）；微信/飞书开润色。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(state.config.appProfiles) { profile in
+                    ProfileRow(state: state, profile: profile)
+                }
+
+                AddProfileMenu(state: state)
+            }
+            .padding(6)
+        }
+    }
+}
+
+private struct ProfileRow: View {
+    @ObservedObject var state: AppState
+    let profile: AppProfile
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(profile.appName.isEmpty ? profile.bundleId : profile.appName)
+                    .font(.system(size: 13, weight: .medium))
+                Text(profile.bundleId)
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                Button {
+                    persist(state.config.appProfiles.filter { $0.bundleId != profile.bundleId })
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13)).foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.borderless)
+            }
+            HStack(spacing: 14) {
+                tri("AI 润色", \.enablePolish)
+                tri("剪贴板上屏", \.useClipboardPaste)
+                tri("连续听写", \.progressiveCommit)
+                Spacer()
+            }
+        }
+        .padding(9)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// 三态：跟随全局（nil）/ 开 / 关
+    private func tri(_ title: String, _ key: WritableKeyPath<AppProfile, Bool?>) -> some View {
+        Picker(title, selection: Binding<Int>(
+            get: {
+                switch profile[keyPath: key] {
+                case nil: return 0
+                case true?: return 1
+                case false?: return 2
+                }
+            },
+            set: { v in
+                var profiles = state.config.appProfiles
+                guard let i = profiles.firstIndex(where: { $0.bundleId == profile.bundleId }) else { return }
+                profiles[i][keyPath: key] = (v == 0 ? nil : v == 1)
+                persist(profiles)
+            })) {
+            Text("跟随全局").tag(0)
+            Text("开").tag(1)
+            Text("关").tag(2)
+        }
+        .pickerStyle(.menu)
+        .controlSize(.small)
+        .fixedSize()
+    }
+
+    private func persist(_ profiles: [AppProfile]) {
+        state.config.appProfiles = profiles
+        state.commitField { $0.appProfiles = profiles }
+        state.onReloadConfig?()
+    }
+}
+
+/// 从正在运行的 App 里挑一个添加 —— 手填 bundleId 是反人类的
+private struct AddProfileMenu: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        Menu {
+            ForEach(runningApps(), id: \.0) { bid, name in
+                Button(name) { add(bundleId: bid, name: name) }
+            }
+        } label: {
+            Label("从正在运行的 App 添加…", systemImage: "plus.circle")
+                .font(.system(size: 12))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    private func runningApps() -> [(String, String)] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { app in
+                guard let bid = app.bundleIdentifier,
+                      bid != Bundle.main.bundleIdentifier,
+                      !state.config.appProfiles.contains(where: { $0.bundleId == bid })
+                else { return nil }
+                return (bid, app.localizedName ?? bid)
+            }
+            .sorted { $0.1.localizedCompare($1.1) == .orderedAscending }
+    }
+
+    private func add(bundleId: String, name: String) {
+        var profiles = state.config.appProfiles
+        profiles.append(AppProfile(bundleId: bundleId, appName: name))
+        state.config.appProfiles = profiles
+        state.commitField { $0.appProfiles = profiles }
+        state.onReloadConfig?()
+    }
+}
 
 // MARK: - 权限与状态
 

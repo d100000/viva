@@ -42,7 +42,18 @@ func runSelfTest(path: String) -> Never {
     ─────────────────────────
     """)
 
-    let asr = DoubaoStreamingASR(config: config)
+    // VIVA_TEST_CTX=1 时附带对话上下文 + 热词 —— 专门验证 dialog_ctx 的协议形状,
+    // 以及它和热词共用 corpus.context 时能否共存(形状错了服务端直接报错)
+    var testConfig = config
+    let testCtx = ProcessInfo.processInfo.environment["VIVA_TEST_CTX"] == "1"
+    if testCtx, testConfig.hotwords.isEmpty {
+        testConfig.hotwords = ["豆包流式语音识别", "上屏"]
+    }
+    let asr = DoubaoStreamingASR(config: testConfig)
+    if testCtx {
+        asr.dialogContext = ["上一句我们聊到豆包流式语音识别的接入方案", "然后讨论了热词直传的 token 上限"]
+        print("    上下文    dialog_ctx 2 条 + 热词 \(testConfig.hotwords.count) 个（VIVA_TEST_CTX=1）")
+    }
 
     var done = false
     var committed = ""

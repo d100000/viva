@@ -1,5 +1,17 @@
 import Foundation
 
+/// 按 App 的配置覆盖（Profile）。竞品标配：在终端里关润色 + 逐字键入,
+/// 在微信里开润色 + 剪贴板上屏。nil = 该项跟随全局配置。
+struct AppProfile: Codable, Equatable, Hashable, Identifiable {
+    var bundleId: String
+    /// 仅展示用；bundleId 才是匹配键
+    var appName: String = ""
+    var enablePolish: Bool? = nil
+    var useClipboardPaste: Bool? = nil
+    var progressiveCommit: Bool? = nil
+    var id: String { bundleId }
+}
+
 /// 运行期配置。
 ///
 /// 读取优先级：环境变量 > `~/.config/viva/config.json` > 默认值。
@@ -64,6 +76,16 @@ struct Config: Codable {
     /// 全局快捷键 ⌃⌥⌘V：把上一段识别结果粘贴到当前光标处。
     /// Secure Input / 注入失败 / 手滑清空时的唯一兜底。
     var pasteLastHotkeyEnabled: Bool = true
+
+    /// 对话上下文：把最近几条识别结果随首包传给豆包（corpus.context 的
+    /// dialog_ctx 用法，限 800 tokens/20 轮），显著提升上下文连贯的识别准确率。
+    /// 隐私：只发**最近的识别文本** —— 这些文本本来就是这家服务识别出来的，
+    /// 不产生新的数据暴露面；App 名等额外信息一概不发。
+    var enableDialogContext: Bool = true
+
+    /// 按 App 自动切换的配置覆盖。会话开始时按目标 App 的 bundleId 查表，
+    /// 命中的字段覆盖全局配置（快照语义，只影响本次会话）。
+    var appProfiles: [AppProfile] = []
 
     // ── 交互 ──
     /// 按住说话的键码。54 = 右 Command。
@@ -202,6 +224,8 @@ struct Config: Codable {
         zhVariant = s(.zhVariant, def.zhVariant)
         accelerateFirstChar = b(.accelerateFirstChar, def.accelerateFirstChar)
         pasteLastHotkeyEnabled = b(.pasteLastHotkeyEnabled, def.pasteLastHotkeyEnabled)
+        enableDialogContext = b(.enableDialogContext, def.enableDialogContext)
+        appProfiles = (try? c.decodeIfPresent([AppProfile].self, forKey: .appProfiles)).flatMap { $0 } ?? def.appProfiles
         hotkeyKeyCode = (try? c.decodeIfPresent(Int64.self, forKey: .hotkeyKeyCode)).flatMap { $0 } ?? def.hotkeyKeyCode
         hotkeyIsModifierOnly = b(.hotkeyIsModifierOnly, def.hotkeyIsModifierOnly)
         hotkeyModifiers = (try? c.decodeIfPresent(UInt64.self, forKey: .hotkeyModifiers)).flatMap { $0 } ?? def.hotkeyModifiers
@@ -235,6 +259,18 @@ struct Config: Codable {
     }
 
     var apiFormat: APIFormat { APIFormat(rawValue: polishAPIFormat) ?? .openAIChat }
+
+    /// 按目标 App 的 Profile 生成本次会话的有效配置。
+    /// 没配 Profile 或字段为 nil（跟随全局）时原样返回。
+    func applyingProfile(for bundleId: String?) -> Config {
+        guard let bid = bundleId,
+              let p = appProfiles.first(where: { $0.bundleId == bid }) else { return self }
+        var c = self
+        if let v = p.enablePolish { c.enablePolish = v }
+        if let v = p.useClipboardPaste { c.useClipboardPaste = v }
+        if let v = p.progressiveCommit { c.progressiveCommit = v }
+        return c
+    }
 
     var polishReady: Bool {
         enablePolish && !polishModel.isEmpty

@@ -16,6 +16,9 @@ final class DoubaoStreamingASR: NSObject {
     enum State { case idle, connecting, streaming, finalizing, closed }
 
     private let config: Config
+    /// 对话上下文：最近几条识别结果，随首包传给服务端（dialog_ctx）。
+    /// 由 VoiceSession 在建会话前设置；--selftest 用 VIVA_TEST_CTX=1 验证协议。
+    var dialogContext: [String] = []
     private var task: URLSessionWebSocketTask?
     private var session: URLSession?
 
@@ -155,13 +158,24 @@ final class DoubaoStreamingASR: NSObject {
             request["accelerate_score"] = 10
         }
 
+        // corpus.context 一个字段两种用法（热词 / 对话上下文），装进同一个内层 JSON。
+        // 热词直传要求 payload 是 JSON string（内层需要自己序列化）。
+        var contextInner: [String: Any] = [:]
         if !config.hotwords.isEmpty {
-            // 热词直传要求 payload 是 JSON string（内层需要自己序列化）
-            let words = config.hotwords.prefix(60).map { ["word": $0] }
-            if let inner = try? JSONSerialization.data(withJSONObject: ["hotwords": words]),
-               let s = String(data: inner, encoding: .utf8) {
-                request["corpus"] = ["context": s]
-            }
+            contextInner["hotwords"] = config.hotwords.prefix(60).map { ["word": $0] }
+        }
+        if !dialogContext.isEmpty {
+            // 最近几条识别结果作为对话上下文（限 800 tokens/20 轮，超出服务端按
+            // 时间从新到旧截断）。提升跨句连贯的识别准确率。
+            // ⚠️ 实测：context_data 的元素必须是对象（common.ContextData），
+            //   传纯字符串数组会报 55000000 "fail to unmarshal corpusCtx"。
+            contextInner["context_type"] = "dialog_ctx"
+            contextInner["context_data"] = dialogContext.map { ["text": $0] }
+        }
+        if !contextInner.isEmpty,
+           let inner = try? JSONSerialization.data(withJSONObject: contextInner),
+           let s = String(data: inner, encoding: .utf8) {
+            request["corpus"] = ["context": s]
         }
 
         let payload: [String: Any] = [

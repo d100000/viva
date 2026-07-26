@@ -73,17 +73,53 @@ final class HUDController {
         //   详见 HUDRoot 里那段注释。系统阴影按窗口的 alpha 形状生成，跟着圆角走。
         p.hasShadow = true
         p.level = .statusBar
-        p.ignoresMouseEvents = true
-        p.isMovable = false
+        // 可拖动：把浮条固定到任意位置（对标 Wispr Flow Bar）。
+        // 代价是浮条不再点击穿透 —— 但它只在说话期间短暂存在，且 nonactivating
+        // 保证点/拖都不抢焦点，上屏目标不会丢。
+        p.ignoresMouseEvents = false
+        p.isMovable = true
+        p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
         p.animationBehavior = .none
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         p.contentView = h
 
+        // 用户拖动 → 记住位置，此后浮条固定在那里（不再跟随光标）。
+        // didMove 对程序化 setFrame 也会响，用「鼠标左键正按着」区分用户拖拽。
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: p, queue: .main
+        ) { [weak self] _ in
+            guard NSEvent.pressedMouseButtons & 1 == 1 else { return }
+            Task { @MainActor in
+                guard let self, let p = self.panel else { return }
+                self.customOrigin = p.frame.origin
+                UserDefaults.standard.set([p.frame.origin.x, p.frame.origin.y],
+                                          forKey: Self.originKey)
+            }
+        }
+
         panel = p
         host = h
         return p
     }
+
+    // MARK: - 自定义位置
+
+    private static let originKey = "viva.hud.customOrigin"
+    /// 用户拖出来的固定位置。nil = 默认行为（贴光标，拿不到就屏幕底部）。
+    private var customOrigin: NSPoint? = {
+        guard let a = UserDefaults.standard.array(forKey: "viva.hud.customOrigin") as? [Double],
+              a.count == 2 else { return nil }
+        return NSPoint(x: a[0], y: a[1])
+    }()
+
+    /// 恢复默认（跟随光标）。设置页的「恢复悬浮条默认位置」按钮调这里。
+    func resetPosition() {
+        customOrigin = nil
+        UserDefaults.standard.removeObject(forKey: Self.originKey)
+    }
+
+    var hasCustomPosition: Bool { customOrigin != nil }
 
     // MARK: - 对外
 
@@ -171,7 +207,10 @@ final class HUDController {
         size.width = min(max(size.width, 132), 620)
         size.height = max(size.height, 34)
 
-        let origin = caretOrigin(for: size) ?? bottomCenterOrigin(for: size)
+        // 用户固定过位置就用它（clamp 回可见区，防显示器变更后跑到屏幕外），
+        // 否则贴光标，拿不到光标回落屏幕底部
+        let origin = clampedCustomOrigin(for: size)
+            ?? caretOrigin(for: size) ?? bottomCenterOrigin(for: size)
         let target = NSRect(origin: origin, size: size)
         if p.isVisible, p.frame.size != size {
             // 文字增长时平滑扩宽，不要一跳一跳
@@ -204,6 +243,15 @@ final class HUDController {
         }
         hideWork = item
         DispatchQueue.main.asyncAfter(deadline: .now() + after, execute: item)
+    }
+
+    private func clampedCustomOrigin(for size: NSSize) -> NSPoint? {
+        guard let o = customOrigin else { return nil }
+        let screen = NSScreen.screens.first { $0.frame.contains(o) }
+            ?? NSScreen.main ?? NSScreen.screens[0]
+        let vf = screen.visibleFrame
+        return NSPoint(x: min(max(o.x, vf.minX), max(vf.minX, vf.maxX - size.width)),
+                       y: min(max(o.y, vf.minY), max(vf.minY, vf.maxY - size.height)))
     }
 
     private func bottomCenterOrigin(for size: NSSize) -> NSPoint {

@@ -104,6 +104,8 @@ final class AppState: ObservableObject {
     var onTestStart: (() -> Void)?
     var onTestStop: (() -> Void)?
     var onReloadConfig: (() -> Void)?
+    /// 恢复悬浮条默认位置（用户拖动固定后想回到「跟随光标」）
+    var onResetHUDPosition: (() -> Void)?
     var onRefreshInputDevices: (() -> Void)?
     var onInputTestStart: (() -> Void)?
     var onInputTestStop: (() -> Void)?

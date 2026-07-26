@@ -23,6 +23,10 @@ final class VoiceSession {
     /// 用户热词 + 启用的预设词库热词（用户词优先），会话开始时快照一次。
     /// 轮转（startASRClient 重入）直接复用，保证轮转前后参数一致。
     private var effectiveHotwords: [String] = []
+    /// 本次会话的有效配置 = 全局配置 + 目标 App 的 Profile 覆盖。
+    /// 会话内一切行为（润色/上屏方式/逐段提交/去句号）都读它,不读全局 config ——
+    /// 否则用户说话说到一半在设置页改配置会把会话行为撕裂。
+    private var sessionConfig = Config()
     /// 逐句上屏时扣下的句末句号，见 TextPolish.PeriodHold
     private var periodHold = TextPolish.PeriodHold()
     /// 已经写进目标 App 的字符数（按字素簇计），润色替换时要靠它算退格次数
@@ -103,6 +107,7 @@ final class VoiceSession {
 
     init(config: Config, capture: AudioCapture, hud: HUDController) {
         self.config = config
+        self.sessionConfig = config
         self.capture = capture
         self.hud = hud
 
@@ -187,17 +192,26 @@ final class VoiceSession {
             return
         }
 
-        polishSnapshot = config.polishReady
-        polishConfigSnapshot = config
-        replacer = TextReplacer(rules: WordlistStore.shared.mergedRules(
-            user: config.replaceRules, enabledLists: config.enabledWordlists))
-        effectiveHotwords = WordlistStore.shared.mergedHotwords(
-            user: config.hotwords, enabledLists: config.enabledWordlists)
-        deferCommitSnapshot = testMode || config.commitOnlyAtEnd || polishSnapshot
-        partialCommitter = (config.progressiveCommit && !deferCommitSnapshot)
-            ? PartialCommitter(config: config) : nil
+        // 目标 App 必须先定 —— 本次会话的有效配置要按它的 Profile 覆盖。
+        // sessionConfig 是快照语义：只影响这一次会话，松手即失效。
         targetBundleId = TextInjector.frontmostBundleId
         targetAppName = NSWorkspace.shared.frontmostApplication?.localizedName
+        sessionConfig = config.applyingProfile(for: testMode ? nil : targetBundleId)
+        if sessionConfig.enablePolish != config.enablePolish
+            || sessionConfig.useClipboardPaste != config.useClipboardPaste
+            || sessionConfig.progressiveCommit != config.progressiveCommit {
+            Log.info("按 App Profile 生效：\(targetAppName ?? targetBundleId ?? "?")")
+        }
+
+        polishSnapshot = sessionConfig.polishReady
+        polishConfigSnapshot = sessionConfig
+        replacer = TextReplacer(rules: WordlistStore.shared.mergedRules(
+            user: sessionConfig.replaceRules, enabledLists: sessionConfig.enabledWordlists))
+        effectiveHotwords = WordlistStore.shared.mergedHotwords(
+            user: sessionConfig.hotwords, enabledLists: sessionConfig.enabledWordlists)
+        deferCommitSnapshot = testMode || sessionConfig.commitOnlyAtEnd || polishSnapshot
+        partialCommitter = (sessionConfig.progressiveCommit && !deferCommitSnapshot)
+            ? PartialCommitter(config: sessionConfig) : nil
         startedAt = Date()
         firstVoiceAt = nil
         firstCharAt = nil
@@ -331,9 +345,16 @@ final class VoiceSession {
     /// 首包参数（热词、判停窗口…）只有这一条代码路径，轮转不会漏配置。
     private func startASRClient() {
         // 预设词库热词并入直传 context（用户词在前，客户端 prefix(60) 截断）
-        var cfg = config
+        var cfg = sessionConfig
         cfg.hotwords = effectiveHotwords
         let client = DoubaoStreamingASR(config: cfg)
+        // 对话上下文：最近几条识别结果（旧→新），帮服务端接住跨句语境。
+        // 只发本服务自己产出过的文本，不发 App 名等新增信息；试听模式不发。
+        if sessionConfig.enableDialogContext, !testMode {
+            client.dialogContext = Array(HistoryStore.shared.records.prefix(3)
+                .map { String(($0.polishedText ?? $0.text).prefix(100)) }
+                .reversed())
+        }
         client.onUpdate = { [weak self] u in
             Task { @MainActor in self?.handle(u) }
         }
@@ -416,7 +437,7 @@ final class VoiceSession {
     /// 逐句上屏路径。走「扣下-补回」，因为写下这一句时还不知道它是不是最后一句，
     /// 而事后回头删是绝对禁止的（见 TextPolish.PeriodHold）。
     private func injectSentence(_ chunk: String) {
-        guard config.stripTrailingPeriod else { inject(chunk); return }
+        guard sessionConfig.stripTrailingPeriod else { inject(chunk); return }
         let out = periodHold.feed(chunk)
         if !out.isEmpty { inject(out) }
     }
@@ -424,14 +445,14 @@ final class VoiceSession {
     /// 一次性整段上屏路径（松手才上屏 / 润色完成 / 润色失败退回原文）。
     /// 这时全文已经在手上，直接去掉末尾那个句号即可，不需要扣下任何东西。
     private func injectWhole(_ text: String) {
-        let out = config.stripTrailingPeriod ? TextPolish.stripTrailingPeriod(text) : text
+        let out = sessionConfig.stripTrailingPeriod ? TextPolish.stripTrailingPeriod(text) : text
         guard !out.isEmpty else { return }
         inject(out)
     }
 
     /// 用户在底部看到的、以及点「复制」拿到的，必须和真正写进输入框的一致
     private func displayed(_ text: String) -> String {
-        config.stripTrailingPeriod ? TextPolish.stripTrailingPeriod(text) : text
+        sessionConfig.stripTrailingPeriod ? TextPolish.stripTrailingPeriod(text) : text
     }
 
     private func handle(_ raw: ASRUpdate) {
@@ -716,7 +737,7 @@ final class VoiceSession {
             return
         }
 
-        switch TextInjector.commit(text, config: config) {
+        switch TextInjector.commit(text, config: sessionConfig) {
         case .injected:
             injectedCharCount += text.count
         case .copiedOnly(let reason):
