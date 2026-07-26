@@ -51,10 +51,11 @@ Swift Package（`app/Package.swift`，swift-tools 6.0 但强制 `.swiftLanguageM
 ### 核心数据流
 
 ```
-HotkeyManager(CGEventTap 捕获右⌘)
+HotkeyManager(CGEventTap 捕获右⌘, 双击=锁定连续听写)
   → VoiceSession(状态机: idle→listening→finalizing→polishing)
       ├── AudioCapture      AVAudioEngine 采集 + 48k→16k 重采样 + 环形预缓冲(preRoll 防首字丢失)
       ├── DoubaoStreamingASR WebSocket 客户端 ←→ SaucProtocol(豆包二进制协议编解码)
+      ├── PartialCommitter  连续听写: partial 稳定前缀逐段上屏(见 09 号方案, 润色时旁路)
       ├── LLMPolisher       可选润色, 走 LLMProvider(各家 OpenAI 兼容预设) + APIFormat
       ├── TextInjector      剪贴板+⌘V 或 CGEvent 逐字, 含 Secure Input 检测
       ├── HUDController     悬浮条, partial 逐字显示 / definite 定格
@@ -64,8 +65,9 @@ MainWindow/SpeakView/SettingsView/HistoryView/StatsView/WelcomeView —— Swift
 main.swift —— 入口 + --selftest 模式
 ```
 
-- **VoiceSession 与上屏方式解耦**：partial 只进 HUD，写进目标 App 的最小单位是一句（definite）。将来做输入法形态只需替换注入层。
+- **VoiceSession 与上屏方式解耦**：partial 只进 HUD，写进目标 App 的最小单位默认是一句（definite）；开了连续听写后，partial 里「标点收尾 + 连续多帧稳定 + 距尾部有安全边距」的前缀也会提前上屏（PartialCommitter，绝不退格的前提下宁漏勿错）。将来做输入法形态只需替换注入层。
 - **润色任务必须被 `polishTask` 持有**：abort() 要能取消它，否则 Esc 取消后润色迟到返回会污染下一次会话的状态机（见 VoiceSession.swift 注释）。
+- **会话轮转**：连续说话超过 rotateAfterSeconds(50s) 会主动换 WebSocket 会话（T1 服务端掐断自动续/T2 definite 边界/T3 音量谷值强切），轮转窗口期音频进 rotationBuffer 不丢字。会话建立 8 秒内被服务端结束不轮转（熔断，防配额耗尽死循环）。
 
 ### 配置
 
