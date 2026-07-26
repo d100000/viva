@@ -118,7 +118,9 @@ struct SpeakView: View {
 
     private var hint: String {
         if !state.canSpeak { return "还差一步 —— 在「设置」里填入 API Key" }
-        if polishing { return "正在润色…" }
+        if polishing {
+            return state.appliedConfig.enablePolish ? "正在润色…" : "正在修正改口…"
+        }
         if listening { return "松开结束" }
         return "按住说话，或按住 \(HotkeyManager.describe(state.config))"
     }
@@ -399,6 +401,7 @@ struct TranscriptPane: View {
             Divider().opacity(0.5)
             HStack(spacing: 10) {
                 PolishToggle()
+                CourseCorrectionBadge()
 
                 // 改词记忆：用户刚改完一处错字 —— 这是学规则的最佳时机。
                 // 从 committed→edited 的 diff 里提取「一处简单替换」，点一下永久生效。
@@ -588,6 +591,30 @@ private struct PolishToggle: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: on)
         .popover(isPresented: $showSetup, arrowEdge: .top) {
             PolishSetupPopover { showSetup = false }
+        }
+    }
+}
+
+/// 改口纠正生效中的小标识。必须挂出来 —— 润色胶囊显示「关闭」而文字仍被
+/// 大模型改过,用户会觉得 App 在说谎（同 PolishToggle 的同源原则）。
+private struct CourseCorrectionBadge: View {
+    @ObservedObject var state = AppState.shared
+
+    private var active: Bool {
+        state.appliedConfig.enableCourseCorrection && state.appliedConfig.llmCredentialsReady
+    }
+
+    var body: some View {
+        if active {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text("改口纠正").font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(.teal)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill(Color.teal.opacity(0.12)))
+            .help("说错了直接重说,上屏只保留你最终想说的。可在设置 → 大模型润色里关闭")
         }
     }
 }

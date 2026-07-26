@@ -738,8 +738,26 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                        if state.config.enablePolish {
-                            Text("代价：上屏比不润色时晚约 0.5~2 秒（取决于模型速度）。超时或调用失败会自动退回原文上屏，不会丢内容。")
+                        Divider()
+
+                        Toggle("改口自动纠正（说错了直接重说，只保留最终意思）",
+                               isOn: $state.config.enableCourseCorrection)
+                        Label {
+                            Text("「明天上午九点，**啊不对，下午三点**」→ 上屏只有「明天下午三点」。自动处理当场改口、口吃重复、犹豫填充词、说到一半放弃的半句；引用别人说的「不对」不会被误改，拿不准的一律保留原样。可以和润色同时开（一次调用完成），也可以只开这一个 —— 只改口，不动你的措辞风格。")
+                        } icon: { Image(systemName: "arrow.uturn.backward.circle") }
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        // 刚打开却还没配模型 —— 当场把最短的路摆出来（推荐 DeepSeek V4 Flash）
+                        if state.config.enableCourseCorrection, !state.config.llmCredentialsReady {
+                            CourseCorrectionSetupCard {
+                                applyProvider(LLMProvider.find("deepseek"))
+                                state.config.polishModel = "deepseek-v4-flash"
+                            }
+                        }
+
+                        if state.config.enablePolish || state.config.enableCourseCorrection {
+                            Text("代价：上屏比直接识别晚约 0.5~2 秒（取决于模型速度）。超时或调用失败会自动退回原文上屏，不会丢内容。")
                                 .font(.caption).foregroundStyle(.orange)
                                 .fixedSize(horizontal: false, vertical: true)
 
@@ -1764,6 +1782,51 @@ private struct InputLevelMeter: View {
 /// 转化位就该出现在痛点发生的地方，而不是首页横幅。
 ///
 /// 分寸：只在**没在用中转站**时显示；不挡住任何原有选项；不做任何夸张承诺。
+/// 「改口纠正」刚打开但大模型还没配 —— 用户意图最强的一瞬间，
+/// 把最短的路当场摆出来：一键按 DeepSeek V4 Flash 配好一切，只留 Key 要填。
+private struct CourseCorrectionSetupCard: View {
+    /// 一键应用 DeepSeek 预设（服务商/地址/协议/模型 = deepseek-v4-flash）
+    let onApplyDeepSeek: () -> Void
+    @State private var applied = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(.orange)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("还差一步：改口纠正要调一个大模型")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("推荐 **DeepSeek V4 Flash** —— 快、便宜（一句话不到一厘钱），改口这种活它绰绰有余。点下面一键配好服务商、地址和模型，然后去 DeepSeek 拿个 API Key 填进下方「API Key」栏即可。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    Button(applied ? "已按 DeepSeek 配置 ✓" : "一键按 DeepSeek V4 Flash 配置") {
+                        onApplyDeepSeek()
+                        applied = true
+                    }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+                    .disabled(applied)
+
+                    Button("去拿 DeepSeek Key") {
+                        if let u = URL(string: "https://platform.deepseek.com/api_keys") {
+                            NSWorkspace.shared.open(u)
+                        }
+                    }
+                    .buttonStyle(.link).controlSize(.small)
+                    Spacer()
+                }
+            }
+        }
+        .padding(11)
+        .background(RoundedRectangle(cornerRadius: 9).fill(Color.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.orange.opacity(0.30)))
+    }
+}
+
 /// 中转站品牌 banner。常驻在润色配置区顶部（选没选中转站都显示）——
 /// 这是 08 号营销方案里的「产品内转化位」，但要守住三条红线：
 /// 不弹窗、不挡功能、身份透明（数据与隐私一节已声明它是作者运营的收费服务）。

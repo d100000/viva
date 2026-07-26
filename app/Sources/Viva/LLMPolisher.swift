@@ -46,6 +46,65 @@ final class LLMPolisher {
     只输出润色后的文本本身，不要任何前缀、后缀、引号或说明。
     """
 
+    /// 改口自动纠正（对标 Typeless 的 Course Correction）。
+    /// 场景覆盖与 few-shot 是效果的关键 —— 规则告诉模型「能改什么」，
+    /// 示例告诉模型「改到什么程度就停手」。第 7/8 条是安全边界：
+    /// 转述别人的「不对」不是改口；拿不准一律保留 —— 宁漏勿错。
+    static let courseCorrectionPrompt = """
+    你是语音输入的「改口修正」引擎。用户说话时会犹豫、口吃、说错了当场改口。\
+    你的唯一任务：输出用户**最终想说的话**，就像他一次就说对了一样。
+
+    处理规则（按优先级）：
+    1. 就近改口：出现「不对 / 不是 / 啊不 / 呃不 / 说错了 / 应该是 / 还是 / 改成」\
+    这类改口标记时，用改后内容替换它前面对应的那部分，标记词本身删除。\
+    例：「周三交，呃不对，周五交」→「周五交」
+    2. 数字、时间、人名、地点改口同理：「三点，不，四点开会」→「四点开会」
+    3. 全局改口：句末出现「前面的 X 都改成 Y」「刚才说的时间改成五点」这类指令时，\
+    应用到全文后删除指令本身
+    4. 中途放弃的半句：「我觉得我们可以先……算了，直接说结论：周五发」→ 只保留说完整的部分
+    5. 口吃与重复：「我们我们」「这个这个」→ 只留一次
+    6. 犹豫填充词：嗯、呃、啊（句首）、那个（填充用法）、就是说、怎么说呢、um、uh → 删除。\
+    ⚠️ 句尾语气词（吧、呢、啊、嘛）是语气的一部分，保留
+    7. 区分「改口」与「转述」：引用别人的话不是改口。\
+    「他说不对，这个数算错了」→ 原样保留，这里的「不对」是内容
+    8. 拿不准是不是改口时，一律原样保留 —— 宁可漏改，不可错改
+
+    硬性约束：
+    - 不改写风格、不换同义词、不总结、不补充任何原文没有的内容
+    - 中英混说、专业术语、英文大小写保持原样
+    - 修正后把标点补顺
+    - 只输出正文，不要任何解释、前缀、引号
+
+    示例：
+    输入：明天上午九点去医院，呃不对，还是下午三点去吧
+    输出：明天下午三点去医院吧
+    输入：这个这个方案我觉得，嗯，就是说其实可以先灰度，先灰度再全量
+    输出：这个方案我觉得其实可以先灰度再全量
+    输入：会议改到周四。啊说错了，周三。对，就周三
+    输出：会议改到周三
+    输入：预算大概五十万，前面说的五十万都改成八十万
+    输出：预算大概八十万
+    输入：他当时就说不对，这个数算错了
+    输出：他当时就说不对，这个数算错了
+    """
+
+    /// 按开关组合本次调用的 system prompt。
+    /// 只开改口 → 只做改口（明确禁止风格改写，用户没要润色就别自作主张）；
+    /// 只开润色 → 原有行为（自定义 prompt 优先）；
+    /// 两个都开 → 一次调用完成：先改口、再润色，输出一份最终文本。
+    static func systemPrompt(for config: Config) -> String {
+        let polishBody = config.polishPrompt.isEmpty ? defaultPrompt : config.polishPrompt
+        switch (config.enableCourseCorrection, config.enablePolish) {
+        case (true, false):  return courseCorrectionPrompt
+        case (false, true):  return polishBody
+        case (true, true):
+            return courseCorrectionPrompt
+                + "\n\n————\n完成上述改口修正后，再按下面的要求对结果做润色，最终只输出一份文本：\n\n"
+                + polishBody
+        case (false, false): return polishBody   // 不该走到，兜底
+        }
+    }
+
     private let config: Config
 
     /// 流式模式下，每收到一段增量就回调「到目前为止的完整文本」。
@@ -59,7 +118,7 @@ final class LLMPolisher {
     ///    VoiceSession 会因为 polishReady==true 而推迟上屏、进入 .polishing，
     ///    然后 polish() 又因为 isConfigured==false 抛「未配置」——
     ///    用户每说一句都白等一次再收到一条红色报错。
-    var isConfigured: Bool { config.polishReady }
+    var isConfigured: Bool { config.llmPassReady }
 
     // MARK: -
 
@@ -84,7 +143,7 @@ final class LLMPolisher {
         }
 
         // ── system ──
-        var system = config.polishPrompt.isEmpty ? Self.defaultPrompt : config.polishPrompt
+        var system = Self.systemPrompt(for: config)
         // ⚠️ 默认**不发**前台 App 名。它确实能让润色风格更贴场景，但代价是每说一句
         //   就等于告诉服务商「此人此刻在用哪个 App」（1Password / Signal / 某内部工具），
         //   而隐私说明里承诺的是「只发送识别出的文本」。属于未披露的额外数据，

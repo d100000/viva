@@ -203,7 +203,8 @@ final class VoiceSession {
             Log.info("按 App Profile 生效：\(targetAppName ?? targetBundleId ?? "?")")
         }
 
-        polishSnapshot = sessionConfig.polishReady
+        // 润色或改口纠正,任一开启且凭证齐 → 推迟上屏走大模型
+        polishSnapshot = sessionConfig.llmPassReady
         polishConfigSnapshot = sessionConfig
         replacer = TextReplacer(rules: WordlistStore.shared.mergedRules(
             user: sessionConfig.replaceRules, enabledLists: sessionConfig.enabledWordlists))
@@ -650,7 +651,9 @@ final class VoiceSession {
         // 「Cloth Code→Claude Code」这类规则在润色后同样该生效
         let polished = replacer.isEmpty ? rawPolished : replacer.apply(rawPolished)
         pendingCommit = ""
-        app.polishNote = raw == polished ? "润色无改动（\(elapsedMs)ms）" : "已润色（\(elapsedMs)ms）"
+        // 提示语按实际开了什么说话:只开改口纠正时说「已润色」会让用户以为被改了风格
+        let noun = (polishConfigSnapshot?.enablePolish ?? true) ? "润色" : "改口修正"
+        app.polishNote = raw == polished ? "\(noun)无改动（\(elapsedMs)ms）" : "已\(noun)（\(elapsedMs)ms）"
         app.committed = displayed(polished)
 
         if testMode {

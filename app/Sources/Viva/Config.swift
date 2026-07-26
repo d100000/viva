@@ -139,6 +139,11 @@ struct Config: Codable {
 
     var enablePolish: Bool = false
 
+    /// 改口自动纠正（对标 Typeless）：「明天九点,啊不对,下午三点」→ 只上屏
+    /// 「明天下午三点」。与润色**共用**同一套大模型凭证/模型配置,可独立开关;
+    /// 开启后与润色一样推迟到松手整段上屏（改口必须拿到全文才能改）。
+    var enableCourseCorrection: Bool = false
+
     /// 厂商预设 id，见 LLMProvider.all
     ///
     /// 默认指向自家中转站：它是唯一「填一个 Key 就能用」的选项，其余每一家都要求
@@ -243,6 +248,7 @@ struct Config: Codable {
         rotateAfterSeconds = i(.rotateAfterSeconds, def.rotateAfterSeconds)
         hardRotateSeconds = i(.hardRotateSeconds, def.hardRotateSeconds)
         enablePolish = b(.enablePolish, def.enablePolish)
+        enableCourseCorrection = b(.enableCourseCorrection, def.enableCourseCorrection)
         polishProvider = s(.polishProvider, def.polishProvider)
         polishThinkingOff = s(.polishThinkingOff, def.polishThinkingOff)
         polishBaseURL = s(.polishBaseURL, def.polishBaseURL)
@@ -276,6 +282,18 @@ struct Config: Codable {
     var polishReady: Bool {
         enablePolish && !polishModel.isEmpty
             && (!polishApiKey.isEmpty || apiFormat == .ollamaNative)
+    }
+
+    /// 大模型凭证是否已配好（与开了哪个功能无关）
+    var llmCredentialsReady: Bool {
+        !polishModel.isEmpty && (!polishApiKey.isEmpty || apiFormat == .ollamaNative)
+    }
+
+    /// 松手后是否要走一遍大模型（润色或改口纠正,共用凭证）。
+    /// ⚠️ VoiceSession 的推迟上屏判据和 LLMPolisher.isConfigured 都必须用它,
+    ///   两边不一致会出现「白等一次再报错」（见 LLMPolisher.isConfigured 注释）。
+    var llmPassReady: Bool {
+        (enablePolish || enableCourseCorrection) && llmCredentialsReady
     }
 
     // MARK: - 加载
