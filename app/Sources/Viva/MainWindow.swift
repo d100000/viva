@@ -62,7 +62,42 @@ struct MainView: View {
     ///   侧边栏是需要时才拉出来的东西，不该一上来就占掉三分之一屏。
     @State private var columns: NavigationSplitViewVisibility = .detailOnly
 
+    // ── 启动进场动画 ──
+    // 时序：窗口淡入(0.45s,MainWindowController) → 品牌 splash(V 标弹出+涟漪+字标)
+    //      → splash 放大淡出,首页从轻微缩小+模糊中弹入 → done
+    private enum LaunchPhase { case splash, revealing, done }
+    /// 每个进程生命周期只播一次 —— 关窗再开不重复表演
+    @MainActor static var didPlayLaunchAnimation = false
+    @State private var launch: LaunchPhase = MainView.didPlayLaunchAnimation ? .done : .splash
+
     var body: some View {
+        ZStack {
+            mainContent
+                .opacity(launch == .splash ? 0 : 1)
+                .scaleEffect(launch == .splash ? 0.97 : 1)
+                .blur(radius: launch == .splash ? 10 : 0)
+
+            if launch != .done {
+                LaunchSplash(exiting: launch == .revealing)
+                    .allowsHitTesting(launch == .splash)   // 退场半途别挡住首页点击
+            }
+        }
+        .onAppear {
+            guard launch == .splash else { return }
+            // splash 停留 1.15s(足够弹出+一圈涟漪),然后 0.45s 交叉揭幕
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                    launch = .revealing
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.65) {
+                launch = .done
+                MainView.didPlayLaunchAnimation = true
+            }
+        }
+    }
+
+    private var mainContent: some View {
         NavigationSplitView(columnVisibility: $columns) {
             List(Page.allCases, selection: $page) { p in
                 Label {
@@ -129,6 +164,73 @@ struct MainView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .vivaGoHome)) { _ in
             withAnimation(.easeInOut(duration: 0.2)) { page = .speak }
+        }
+    }
+}
+
+// MARK: - 启动进场 splash
+
+/// 品牌进场动画：V 标从小弹出（带轻微旋转回正）、光环涟漪向外扩散、
+/// 字标延迟浮现；退场时整体放大 + 淡出，把舞台交给首页。
+/// 涟漪用 TimelineView 统一相位驱动 —— 和 VoiceOrb 同一套做法，各圈永不漂移。
+private struct LaunchSplash: View {
+    /// 父视图把它切到退场态（带着 withAnimation 一起来）
+    let exiting: Bool
+    @State private var markIn = false
+    @State private var textIn = false
+
+    var body: some View {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            RadialGradient(colors: [Color.accentColor.opacity(0.10), .clear],
+                           center: .center, startRadius: 30, endRadius: 420)
+
+            VStack(spacing: 20) {
+                ZStack {
+                    // 涟漪圈,以 V 标为圆心
+                    if markIn && !exiting {
+                        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { ctx in
+                            let t = ctx.date.timeIntervalSinceReferenceDate
+                            ZStack {
+                                ForEach(0..<3, id: \.self) { i in
+                                    let p = ((t / 1.4) + Double(i) / 3.0)
+                                        .truncatingRemainder(dividingBy: 1)
+                                    let eased = 1 - pow(1 - p, 3)      // easeOutCubic
+                                    Circle()
+                                        .strokeBorder(
+                                            Color.accentColor.opacity(0.30 * (1 - eased)),
+                                            lineWidth: 2 - 1.4 * eased)
+                                        .frame(width: 136, height: 136)
+                                        .scaleEffect(1 + 1.05 * eased)
+                                }
+                            }
+                        }
+                    }
+                    VivaMark(size: 108)
+                        .scaleEffect(markIn ? 1 : 0.5)
+                        .rotationEffect(.degrees(markIn ? 0 : -8))
+                        .opacity(markIn ? 1 : 0)
+                }
+                .frame(height: 150)
+
+                VStack(spacing: 6) {
+                    Text("Viva")
+                        .font(.system(size: 30, weight: .semibold, design: .rounded))
+                    Text("话音未落，字已上屏。")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                .opacity(textIn ? 1 : 0)
+                .offset(y: textIn ? 0 : 12)
+            }
+        }
+        // 退场：放大 + 淡出（动画曲线由父视图的 withAnimation 决定）
+        .scaleEffect(exiting ? 1.12 : 1)
+        .opacity(exiting ? 0 : 1)
+        .ignoresSafeArea()
+        .onAppear {
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.62)) { markIn = true }
+            withAnimation(.easeOut(duration: 0.45).delay(0.3)) { textIn = true }
         }
     }
 }
@@ -554,7 +656,16 @@ final class MainWindowController {
         w.isReleasedWhenClosed = false
         w.contentView = NSHostingView(rootView: MainView())
         window = w
+
+        // 进场：窗口从全透明淡入（配合 MainView 里的品牌 splash 完成整套进场动画）。
+        // 只在首次创建时播 —— 关窗再开走上面的快速路径，不重复表演。
+        w.alphaValue = 0
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.45
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            w.animator().alphaValue = 1
+        }
     }
 }
