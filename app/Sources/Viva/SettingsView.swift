@@ -951,6 +951,21 @@ struct SettingsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
 
+                            HStack {
+                                Text("最长等待").frame(width: 74, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(state.config.polishTimeoutMs) },
+                                    set: { state.config.polishTimeoutMs = Int($0) }),
+                                       in: 1000...5000, step: 500)
+                                    .frame(width: 220)
+                                Text(String(format: "%.1f 秒", Double(state.config.polishTimeoutMs) / 1000))
+                                    .monospacedDigit()
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Text("超过这个时间模型还没返回就**放弃润色，直接上屏原始识别结果**，不会丢内容、不会一直干等。说长文时会按字数自动略放宽（每字 +30ms），短句以这里为准。")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
                             Divider()
 
                             // ── 测试连接 ──
