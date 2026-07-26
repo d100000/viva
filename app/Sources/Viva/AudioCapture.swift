@@ -257,10 +257,13 @@ final class AudioCapture {
             do { try prewarm(force: true) }
             catch { Log.error("即时启动采集失败：\(error.localizedDescription)") }
         }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         isCapturing = true
         let head = preRoll
-        preRoll.removeAll(keepingCapacity: true)
+        // 不要在这里 removeAll(keepingCapacity:)。preRoll 的存储刚被 head 共享，
+        // macOS 26 的 Data COW 在音频线程频繁 append 的压力下会触发
+        // ensureUniqueBufferReference 的 SIGTRAP。换成新值不修改旧存储。
+        preRoll = Data()
         pending = head
         // 立刻把整包的部分吐出去，剩下不足一包的留在 pending
         var out = Data()
@@ -268,6 +271,8 @@ final class AudioCapture {
             out.append(pending.prefix(chunkBytes))
             pending.removeFirst(chunkBytes)
         }
+        lock.unlock()
+        Log.info("开始采集：预缓冲 \(head.count) 字节")
         return out
     }
 
@@ -276,9 +281,10 @@ final class AudioCapture {
         lock.lock()
         isCapturing = false
         let tail = pending
-        pending.removeAll(keepingCapacity: true)
-        preRoll.removeAll(keepingCapacity: true)
+        pending = Data()
+        preRoll = Data()
         lock.unlock()
+        Log.info("停止采集：尾部 \(tail.count) 字节")
         if runningDeviceIsBluetooth { stopEngine() }
         return tail
     }
@@ -298,8 +304,8 @@ final class AudioCapture {
         }
 
         lock.lock()
-        pending.removeAll(keepingCapacity: true)
-        preRoll.removeAll(keepingCapacity: true)
+        pending = Data()
+        preRoll = Data()
         isTesting = true
         lock.unlock()
     }
@@ -307,8 +313,8 @@ final class AudioCapture {
     func stopTesting() {
         lock.lock()
         isTesting = false
-        pending.removeAll(keepingCapacity: true)
-        preRoll.removeAll(keepingCapacity: true)
+        pending = Data()
+        preRoll = Data()
         lock.unlock()
         if runningDeviceIsBluetooth { stopEngine() }
     }
