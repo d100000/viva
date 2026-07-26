@@ -150,6 +150,10 @@ struct Config: Codable {
     /// 是否已经走过欢迎/配置引导。首次启动展示欢迎页，之后直接进主界面。
     var hasSeenWelcome: Bool = false
 
+    /// 启动时自动检查并安装新版本（GitHub Releases）。
+    /// 关掉后仍会检查并在菜单栏/设置页提示，只是不自动装。
+    var autoUpdate: Bool = true
+
     // MARK: - 容错解码
     //
     // ⚠️ 这段不能删。用合成的 Codable 时，只要新版本加了一个字段，
@@ -207,6 +211,7 @@ struct Config: Codable {
         sendAppContext = b(.sendAppContext, def.sendAppContext)
         polishTimeoutMs = i(.polishTimeoutMs, def.polishTimeoutMs)
         hasSeenWelcome = b(.hasSeenWelcome, def.hasSeenWelcome)
+        autoUpdate = b(.autoUpdate, def.autoUpdate)
     }
 
     var apiFormat: APIFormat { APIFormat(rawValue: polishAPIFormat) ?? .openAIChat }

@@ -25,6 +25,12 @@ final class AppState: ObservableObject {
     @Published var hotkeyTestResult: Bool?
     @Published var hotkeyTestMessage = "尚未测试实际按键"
 
+    // ── 软件更新 ──
+    /// 有可用新版时为其版本号，否则 nil
+    @Published var updateAvailable: String?
+    @Published var updateStatus = ""
+    @Published var updateBusy = false
+
     // ── 音频输入设备 ──
     @Published var audioInputDevices: [AudioInputDevice] = []
     @Published var audioInputDevicesLoading = false
@@ -99,6 +105,8 @@ final class AppState: ObservableObject {
     var onRefreshPermissions: (() -> Void)?
     var onHotkeyTestStart: (() -> Void)?
     var onHotkeyTestCancel: (() -> Void)?
+    var onCheckUpdate: (() -> Void)?
+    var onInstallUpdate: (() -> Void)?
 
     private var permTimer: Timer?
 

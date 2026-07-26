@@ -18,6 +18,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 锁定期间 onPress/onRelease 都被旁路，单击（onShortTap）= 结束。
     private var dictationLocked = false
     private var lastShortTapAt: Date?
+
+    // ── 软件更新 ──
+    private let updater = UpdateChecker()
+    private var pendingRelease: UpdateChecker.Release?
+    private var updateTimer: Timer?
     /// 当前 capture / hotkey 是按哪份配置搭起来的，用来判断要不要真的重建。
     /// ⚠️ 没有它的话，词库页每加一个热词都会整体重启 AVAudioEngine + 重建 CGEventTap，
     ///   而 macOS 上「停掉引擎立刻新建再 start」是出了名的易失败时序
@@ -70,11 +75,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onRefreshPermissions = { [weak self] in self?.checkPermissionsAndHotkey() }
         state.onHotkeyTestStart = { [weak self] in self?.startHotkeyTest() }
         state.onHotkeyTestCancel = { [weak self] in self?.cancelHotkeyTest() }
+        state.onCheckUpdate = { [weak self] in self?.checkForUpdate(manual: true) }
+        state.onInstallUpdate = { [weak self] in self?.installPendingUpdate() }
         refreshInputDevices()
         checkPermissionsAndHotkey(forceRetry: true)
 
         escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] ev in
             if ev.keyCode == 53 { Task { @MainActor in self?.session.abort() } }
+        }
+
+        // 启动 5 秒后查一次更新（错开启动关键路径），此后每 24 小时一次 ——
+        // 菜单栏 App 一挂几个星期，只查启动那一次会漏掉所有后续版本
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            self?.checkForUpdate(manual: false)
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkForUpdate(manual: false) }
         }
 
         // 首次启动（或还没配好 Key）走欢迎引导；否则直接进主界面。
@@ -538,6 +554,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         open.target = self
         menu.addItem(open)
 
+        if let v = state.updateAvailable {
+            let up = NSMenuItem(title: "⬆️ 升级到 \(v)…",
+                                action: #selector(installUpdateFromMenu), keyEquivalent: "")
+            up.target = self
+            menu.addItem(up)
+        }
+
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)),
                               keyEquivalent: "q")
@@ -547,5 +570,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openMain() { mainWindow.show() }
+
+    // MARK: - 软件更新
+
+    /// manual = 用户点了「检查更新」按钮（失败/已最新都要给反馈）；
+    /// 自动检查时这两种情况保持安静，别拿弹窗烦人。
+    private func checkForUpdate(manual: Bool) {
+        guard !state.updateBusy else { return }
+        state.updateBusy = true
+        if manual { state.updateStatus = "检查中…" }
+
+        Task { @MainActor in
+            defer { state.updateBusy = false }
+            do {
+                guard let release = try await updater.checkLatest() else {
+                    pendingRelease = nil
+                    state.updateAvailable = nil
+                    if manual { state.updateStatus = "已是最新版（\(UpdateChecker.currentVersion)）" }
+                    return
+                }
+                pendingRelease = release
+                state.updateAvailable = release.version
+                state.updateStatus = "发现新版 \(release.version)"
+                buildMenu()   // 菜单栏挂上「升级」入口
+
+                // 自动模式：正在说话/润色时绝不动刀 —— 换包要重启，会打断会话。
+                // 忙就留给 24h 定时器或下次启动，提示入口反正已经亮了。
+                if state.config.autoUpdate, !manual, session.state == .idle {
+                    // ⚠️ 必须先解锁再调用：本 Task 的 defer 此刻还没执行，
+                    //   updateBusy 仍是 true，不解锁 install 的 guard 会直接吞掉这次安装
+                    //  （实测踩过：日志只有「发现新版」，后面什么都不发生）
+                    state.updateBusy = false
+                    installPendingUpdate()
+                }
+            } catch {
+                pendingRelease = nil
+                state.updateAvailable = nil
+                if manual { state.updateStatus = error.localizedDescription }
+                Log.warn("检查更新失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func installPendingUpdate() {
+        guard let release = pendingRelease, !state.updateBusy else { return }
+        guard session.state == .idle else {
+            state.updateStatus = "正在录音/润色，稍后再更新"
+            return
+        }
+        state.updateBusy = true
+        hud.flash(message: "正在更新到 \(release.version)，完成后自动重启…", duration: 3)
+
+        Task { @MainActor in
+            do {
+                // 成功路径不会返回 —— downloadAndInstall 末尾会重启进程
+                try await updater.downloadAndInstall(release) { [weak self] step in
+                    self?.state.updateStatus = step
+                }
+            } catch {
+                state.updateBusy = false
+                state.updateStatus = error.localizedDescription
+                Log.error("更新失败：\(error.localizedDescription)")
+                hud.flash(message: "更新失败：\(error.localizedDescription)", isError: true, duration: 3.5)
+            }
+        }
+    }
+
+    @objc private func installUpdateFromMenu() { installPendingUpdate() }
 
 }

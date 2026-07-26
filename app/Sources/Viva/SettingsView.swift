@@ -815,6 +815,36 @@ struct SettingsView: View {
                     .padding(6)
                 }
 
+                GroupBox("软件更新") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            Text("当前版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")")
+                                .font(.callout)
+                            if state.updateBusy { ProgressView().controlSize(.small) }
+                            if !state.updateStatus.isEmpty {
+                                Text(state.updateStatus)
+                                    .font(.callout).foregroundStyle(.secondary)
+                            }
+                        }
+                        Toggle("启动时自动更新到新版本", isOn: $state.config.autoUpdate)
+                        HStack {
+                            Button("检查更新") { state.onCheckUpdate?() }
+                                .disabled(state.updateBusy)
+                            if state.updateAvailable != nil {
+                                Button("立即更新") { state.onInstallUpdate?() }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(state.updateBusy)
+                            }
+                        }
+                        Label {
+                            Text("更新来源是 [GitHub Releases](https://github.com/d100000/viva/releases)，下载后校验版本、原地替换并自动重启。⚠️ 由于 Viva 是 ad-hoc 签名（没有开发者证书），**每次更新后「辅助功能」授权会失效** —— 去 系统设置 → 隐私与安全性 → 辅助功能 把 Viva 移除再重新添加，热键即恢复，无需重启。")
+                        } icon: { Image(systemName: "arrow.triangle.2.circlepath") }
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(6)
+                }
+
                 GroupBox("数据与隐私") {
                     VStack(alignment: .leading, spacing: 8) {
                         // ⚠️ 这段必须分层说。原来只有一句「不经过任何第三方服务器」，
