@@ -639,6 +639,8 @@ extension Notification.Name {
     static let vivaOpenSettings = Notification.Name("viva.openSettings")
     /// 返回主界面（说话页）。工具栏的「返回」按钮和主菜单的 ⌘[ 都走这里。
     static let vivaGoHome = Notification.Name("viva.goHome")
+    /// 收起到菜单栏：藏起主窗口 + Dock 图标，只留顶部状态栏图标。
+    static let vivaCollapseToMenuBar = Notification.Name("viva.collapseToMenuBar")
 }
 
 /// 工具条上的小玻璃按钮

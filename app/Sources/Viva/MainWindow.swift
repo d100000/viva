@@ -138,6 +138,21 @@ struct MainView: View {
             //   ⚠️ 用 HStack 显式写图标+文字，不要用 Label：macOS 工具栏里的 Label
             //      默认只渲染图标，一个光秃秃的 chevron 认不出是「回主界面」。
             .toolbar {
+                // ⭐ 右上角「收起到菜单栏」。语音输入的常态是挂在后台随叫随到，
+                //   主窗口只是配置台 —— 给一个一键退场的口，App 缩进顶部状态栏。
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        NotificationCenter.default.post(name: .vivaCollapseToMenuBar,
+                                                        object: nil)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "menubar.arrow.up.rectangle")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("收起")
+                        }
+                    }
+                    .help("收起到菜单栏 —— 窗口和 Dock 图标都会藏起来，热键照常可用，点顶部状态栏图标随时唤回")
+                }
                 if page != .speak {
                     ToolbarItem(placement: .navigation) {
                         Button {
@@ -639,6 +654,9 @@ func compactNumber(_ n: Int) -> String {
 @MainActor
 final class MainWindowController {
     private var window: NSWindow?
+
+    /// 收起到菜单栏时藏起窗口（不销毁，唤回秒开）
+    func hide() { window?.orderOut(nil) }
 
     func show() {
         if let w = window {

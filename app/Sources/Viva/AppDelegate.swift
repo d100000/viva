@@ -111,6 +111,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.hud.flash(message: "悬浮条已恢复默认位置（跟随光标）", duration: 1.6)
         }
 
+        // 「收起到菜单栏」：窗口 + Dock 图标一起藏,只留状态栏图标,热键照常
+        NotificationCenter.default.addObserver(
+            forName: .vivaCollapseToMenuBar, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.collapseToMenuBar() }
+        }
+
         // 首次启动（或还没配好 Key）走欢迎引导；否则直接进主界面。
         // 无论走哪条，都必须开一个窗口 —— 菜单栏 App 什么都不弹的话，
         // 用户会以为「装了但没打开」。
@@ -593,7 +600,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    @objc private func openMain() { mainWindow.show() }
+    @objc private func openMain() {
+        // 可能正处于「收起到菜单栏」的 accessory 形态,先把 Dock 图标请回来
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
+        mainWindow.show()
+    }
+
+    /// 收起到菜单栏:窗口藏起、Dock 图标撤下,App 变成纯菜单栏形态。
+    /// 热键/识别/自动更新全部照常 —— 这本来就是语音输入工具的常驻姿势。
+    /// 弹 HUD 提醒用户去哪找回来 —— 不弹的话「App 消失了」跟「App 崩了」没区别。
+    private func collapseToMenuBar() {
+        mainWindow.hide()
+        NSApp.setActivationPolicy(.accessory)
+        hud.flash(message: "Viva 已收起到顶部菜单栏 —— 热键照常可用，点状态栏图标随时唤回",
+                  duration: 3.2)
+        Log.info("已收起到菜单栏（accessory 形态）")
+    }
 
     // MARK: - 粘贴上一段
 
