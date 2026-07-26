@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "it",
+  "name": "IT / 编程常用词",
+  "description": "面向开发者的官方预设词库：AI 工具、编程语言、框架与基础设施的专有名词，外加几条确定性替换纠错。由仓库维护，App 每天自动同步最新版。",
+  "version": 1,
+  "updatedAt": "2026-07-26",
+  "hotwords": [
+    "Claude", "Claude Code", "ChatGPT", "OpenAI", "Anthropic", "DeepSeek",
+    "Gemini", "Copilot", "Cursor", "Midjourney", "Stable Diffusion",
+    "大模型", "提示词", "智能体", "上下文", "微调", "向量数据库",
+    "Transformer", "Token", "Prompt", "Agent", "RAG", "MCP",
+    "GitHub", "GitLab", "Git", "Docker", "Kubernetes", "Nginx", "Redis",
+    "MySQL", "PostgreSQL", "MongoDB", "SQLite", "Elasticsearch",
+    "Linux", "Ubuntu", "macOS", "iOS", "Android", "Windows",
+    "VS Code", "Xcode", "Vim", "Homebrew", "Terminal", "Shell", "Bash",
+    "Python", "JavaScript", "TypeScript", "Swift", "Kotlin", "Rust",
+    "Golang", "Node.js", "React", "Vue", "Flutter", "Electron",
+    "API", "SDK", "HTTP", "HTTPS", "WebSocket", "JSON", "YAML",
+    "SQL", "GraphQL", "gRPC", "OAuth", "JWT", "CI/CD", "DevOps",
+    "微服务", "容器化", "灰度发布", "回滚", "压测", "联调", "鉴权",
+    "消息队列", "内存泄漏", "断点调试", "代码评审", "单元测试"
+  ],
+  "replaceRules": [
+    { "from": "Cloth Code", "to": "Claude Code" },
+    { "from": "克劳德", "to": "Claude" },
+    { "from": "派森", "to": "Python" },
+    { "from": "吉特哈布", "to": "GitHub" }
+  ]
+}

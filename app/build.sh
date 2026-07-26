@@ -29,6 +29,13 @@ else
 fi
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 
+# 预设词库:单一数据源在仓库根目录 wordlists/(GitHub raw 同步用的也是它),
+# 构建时打一份进 Resources 作离线兜底。两处永远不会漂移 —— 因为只有一处源文件。
+if [ -d ../wordlists ]; then
+  mkdir -p "${APP_DIR}/Contents/Resources/wordlists"
+  cp ../wordlists/*.json "${APP_DIR}/Contents/Resources/wordlists/"
+fi
+
 # 代码签名。TCC 授权(辅助功能/麦克风)绑定的是签名身份的「指定要求(DR)」:
 #   - 固定证书签名 → DR = certificate leaf 指纹,换版本、重编译都不变 → 授权跨更新存活。
 #   - ad-hoc 签名  → DR = cdhash(这一份二进制的哈希),一重编译就变 → 每次都要重新授权。

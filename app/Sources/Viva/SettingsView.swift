@@ -211,6 +211,12 @@ struct DictionaryView: View {
                     .padding(6)
                 }
 
+                // ── 预设词库 ──
+                PresetWordlistSection(state: state)
+
+                // ── 替换词表 ──
+                ReplaceRuleSection(state: state)
+
                 // ── 状态与警告 ──
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -289,6 +295,158 @@ struct DictionaryView: View {
         state.onReloadConfig?()
         justSaved = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { justSaved = false }
+    }
+}
+
+// MARK: - 预设词库
+
+/// 官方维护的预设词库（数据在仓库 wordlists/，App 每天自动从 GitHub 同步）。
+/// 用户自己的热词永远优先于预设词 —— 直传 context 只有约 100 tokens。
+private struct PresetWordlistSection: View {
+    @ObservedObject var state: AppState
+    @ObservedObject var store = WordlistStore.shared
+
+    var body: some View {
+        GroupBox("预设词库") {
+            VStack(alignment: .leading, spacing: 10) {
+                if store.lists.isEmpty {
+                    Text("没有可用的预设词库（安装包不完整？）")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(store.lists) { list in
+                    HStack(alignment: .top, spacing: 10) {
+                        Toggle("", isOn: binding(for: list.id))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(list.name)
+                                    .font(.system(size: 13, weight: .medium))
+                                Text("\(list.hotwords.count) 词 · \(list.replaceRules.count) 条替换 · v\(list.version)")
+                                    .font(.caption).foregroundStyle(.tertiary)
+                            }
+                            Text(list.description)
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                    }
+                }
+
+                Divider()
+                HStack(spacing: 10) {
+                    Button("立即同步") { store.refresh(force: true) }
+                        .controlSize(.small)
+                        .disabled(store.syncing)
+                    if store.syncing { ProgressView().controlSize(.small) }
+                    if !store.syncStatus.isEmpty {
+                        Text(store.syncStatus)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                Text("词库由官方仓库维护，每天自动同步 —— 仓库里加了新词，全体用户次日就能用上，不用等发版。你自己的热词永远排在预设词前面。")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(6)
+        }
+    }
+
+    private func binding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: { state.config.enabledWordlists.contains(id) },
+            set: { on in
+                var lists = state.config.enabledWordlists
+                if on { if !lists.contains(id) { lists.append(id) } }
+                else { lists.removeAll { $0 == id } }
+                state.config.enabledWordlists = lists
+                state.commitField { $0.enabledWordlists = lists }
+                state.onReloadConfig?()
+            })
+    }
+}
+
+// MARK: - 替换词表
+
+/// 确定性纠正：热词只能提高概率，替换是板上钉钉。
+/// 「Cloth Code→Claude Code」这类顽固错误、以及主界面「记住改法」学来的规则都在这里。
+private struct ReplaceRuleSection: View {
+    @ObservedObject var state: AppState
+    @State private var newFrom = ""
+    @State private var newTo = ""
+
+    var body: some View {
+        GroupBox("替换词表（改词记忆）") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("识别结果里出现左边的词，一律替换成右边的。热词纠不动的顽固错误靠它 —— 识别完在主界面改一次错字，也会自动提示「记住改法」加进这里。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    TextField("识别成了…", text: $newFrom)
+                        .textFieldStyle(.roundedBorder).frame(width: 150)
+                    Image(systemName: "arrow.right").font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("应该是…", text: $newTo)
+                        .textFieldStyle(.roundedBorder).frame(width: 150)
+                    Button("添加", action: addRule)
+                        .disabled(newFrom.trimmingCharacters(in: .whitespaces).isEmpty
+                                  || newTo.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Spacer()
+                }
+
+                if !state.config.replaceRules.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(state.config.replaceRules) { rule in
+                            HStack(spacing: 8) {
+                                Text(rule.from)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .strikethrough(color: .secondary)
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+                                Text(rule.to)
+                                    .font(.system(size: 12, design: .monospaced))
+                                Spacer()
+                                Button {
+                                    removeRule(rule)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 12)).foregroundStyle(.tertiary)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            .padding(.horizontal, 9).padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.04),
+                                        in: RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+                }
+            }
+            .padding(6)
+        }
+    }
+
+    private func addRule() {
+        let from = newFrom.trimmingCharacters(in: .whitespacesAndNewlines)
+        let to = newTo.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !from.isEmpty, !to.isEmpty, from != to else { return }
+        var rules = state.config.replaceRules.filter { $0.from != from }   // 同 from 覆盖
+        rules.append(ReplaceRule(from: from, to: to))
+        persist(rules)
+        newFrom = ""; newTo = ""
+    }
+
+    private func removeRule(_ rule: ReplaceRule) {
+        persist(state.config.replaceRules.filter { $0 != rule })
+    }
+
+    private func persist(_ rules: [ReplaceRule]) {
+        state.config.replaceRules = rules
+        state.commitField { $0.replaceRules = rules }
+        state.onReloadConfig?()
     }
 }
 
@@ -454,6 +612,13 @@ struct SettingsView: View {
                         Text("按下热键时，把此前这段时间的音频一并送出，解决「开头几个字被吃掉」。豆包官方 Mac 输入法实测就有这个毛病。")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+
+                        Divider()
+
+                        Toggle("⌃⌥⌘V 全局粘贴上一段识别结果", isOn: $state.config.pasteLastHotkeyEnabled)
+                        Text("目标 App 开着安全键盘输入、或注入失败只进了剪贴板时，用它把上一段找回来。菜单栏里也有同名入口。")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(6)
                 }
@@ -507,6 +672,29 @@ struct SettingsView: View {
                         Label {
                             Text("语音输入十有八九是往聊天框、搜索框、命令行里塞一句话，那个句号既多余又得手动删。**只去句号** —— 问号和感叹号带语气，去掉会改变意思；省略号「……」也会原样保留。\n逐句上屏时用的是「先扣下、下一句到了再补回去」，不是事后退格删 —— 本工具任何情况下都不会回头改已经写进你输入框的内容。")
                         } icon: { Image(systemName: "text.badge.minus") }
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        Divider()
+
+                        HStack {
+                            Text("中文字形").frame(width: 92, alignment: .leading)
+                            Picker("", selection: $state.config.zhVariant) {
+                                Text("简体（默认）").tag("")
+                                Text("繁体").tag("traditional")
+                                Text("台湾正体").tag("tw")
+                                Text("香港繁体").tag("hk")
+                            }
+                            .labelsHidden()
+                            .frame(width: 160)
+                            Spacer()
+                        }
+
+                        Toggle("极速模式（首字更快，但首字准确率下降）",
+                               isOn: $state.config.accelerateFirstChar)
+                        Label {
+                            Text("enable_accelerate_text：服务端更激进地吐首字，实测能快 100~200ms，代价是开头个别字更容易识错。追求「按下就出字」的手感再开。")
+                        } icon: { Image(systemName: "hare") }
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 

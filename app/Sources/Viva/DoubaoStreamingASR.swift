@@ -145,6 +145,16 @@ final class DoubaoStreamingASR: NSObject {
             "enable_ddc": config.enableDdc,
         ]
 
+        // 繁体输出（traditional/tw/hk），简体不传 —— 少传一个参数少一分风险
+        if !config.zhVariant.isEmpty {
+            request["output_zh_variant"] = config.zhVariant
+        }
+        // 极速模式：首字更快，代价是首字准确率。score 0~20 越大越激进，取中间值
+        if config.accelerateFirstChar {
+            request["enable_accelerate_text"] = true
+            request["accelerate_score"] = 10
+        }
+
         if !config.hotwords.isEmpty {
             // 热词直传要求 payload 是 JSON string（内层需要自己序列化）
             let words = config.hotwords.prefix(60).map { ["word": $0] }

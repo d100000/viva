@@ -16,6 +16,13 @@ final class VoiceSession {
     private var asr: DoubaoStreamingASR?
     private var committedText = ""
     private var pendingCommit = ""
+    /// 确定性替换（改词记忆 + 预设词库规则），会话开始时快照一次。
+    /// partial 和 definite 都过同一套规则 —— PartialCommitter 的前缀去重
+    /// 要求两边文本一致，只替换一边会算错余额。
+    private var replacer = TextReplacer(rules: [])
+    /// 用户热词 + 启用的预设词库热词（用户词优先），会话开始时快照一次。
+    /// 轮转（startASRClient 重入）直接复用，保证轮转前后参数一致。
+    private var effectiveHotwords: [String] = []
     /// 逐句上屏时扣下的句末句号，见 TextPolish.PeriodHold
     private var periodHold = TextPolish.PeriodHold()
     /// 已经写进目标 App 的字符数（按字素簇计），润色替换时要靠它算退格次数
@@ -182,6 +189,10 @@ final class VoiceSession {
 
         polishSnapshot = config.polishReady
         polishConfigSnapshot = config
+        replacer = TextReplacer(rules: WordlistStore.shared.mergedRules(
+            user: config.replaceRules, enabledLists: config.enabledWordlists))
+        effectiveHotwords = WordlistStore.shared.mergedHotwords(
+            user: config.hotwords, enabledLists: config.enabledWordlists)
         deferCommitSnapshot = testMode || config.commitOnlyAtEnd || polishSnapshot
         partialCommitter = (config.progressiveCommit && !deferCommitSnapshot)
             ? PartialCommitter(config: config) : nil
@@ -319,7 +330,10 @@ final class VoiceSession {
     /// 建一个新的 ASR 会话并接管 asr 引用。begin() 和 continueRotation 共用 ——
     /// 首包参数（热词、判停窗口…）只有这一条代码路径，轮转不会漏配置。
     private func startASRClient() {
-        let client = DoubaoStreamingASR(config: config)
+        // 预设词库热词并入直传 context（用户词在前，客户端 prefix(60) 截断）
+        var cfg = config
+        cfg.hotwords = effectiveHotwords
+        let client = DoubaoStreamingASR(config: cfg)
         client.onUpdate = { [weak self] u in
             Task { @MainActor in self?.handle(u) }
         }
@@ -420,7 +434,14 @@ final class VoiceSession {
         config.stripTrailingPeriod ? TextPolish.stripTrailingPeriod(text) : text
     }
 
-    private func handle(_ u: ASRUpdate) {
+    private func handle(_ raw: ASRUpdate) {
+        // 确定性替换（改词记忆）在文本入口统一做：definite 和 partial 用同一套
+        // 规则，下游（PartialCommitter/HUD/历史）看到的是一致的替换后文本。
+        var u = raw
+        if !replacer.isEmpty {
+            u.newDefinite = replacer.apply(u.newDefinite)
+            u.partial = replacer.apply(u.partial)
+        }
         // ⚠️ 必须挡住「会话已结束但回调还在途」的那一跳。
         //   ASR 回调是 Task { @MainActor in handle(u) }，Esc 的 abort 也是一次同样的
         //   异步跳转；abort 先执行完之后，那一帧仍会走到这里，在逐句上屏模式下把
@@ -476,7 +497,8 @@ final class VoiceSession {
 
     // MARK: - 收尾
 
-    private func handleFinished(_ trailing: String) {
+    private func handleFinished(_ rawTrailing: String) {
+        let trailing = replacer.isEmpty ? rawTrailing : replacer.apply(rawTrailing)
         // ⚠️ 同 handle(_:)：会话已经被 abort 打回 .idle 时，在途的最终帧不能再往下走。
         //   否则 tail 会被追加上屏，state 还会被从 .idle 改回 .polishing 起一个新的润色请求，
         //   最后给这次已取消的会话写一条历史记录。
@@ -601,8 +623,11 @@ final class VoiceSession {
     }
 
     /// 润色成功 → 一次性上屏
-    private func applyPolish(raw: String, polished: String, elapsedMs: Int) {
+    private func applyPolish(raw: String, polished rawPolished: String, elapsedMs: Int) {
         guard state == .polishing else { return }      // 兜底：已取消就不做任何事
+        // 润色是 LLM 重写的新文本，没走过 handle() 的替换入口，这里补一遍 ——
+        // 「Cloth Code→Claude Code」这类规则在润色后同样该生效
+        let polished = replacer.isEmpty ? rawPolished : replacer.apply(rawPolished)
         pendingCommit = ""
         app.polishNote = raw == polished ? "润色无改动（\(elapsedMs)ms）" : "已润色（\(elapsedMs)ms）"
         app.committed = displayed(polished)

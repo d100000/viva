@@ -93,6 +93,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.checkForUpdate(manual: false) }
         }
 
+        // 预设词库：启动 3 秒后同步一次 GitHub 上的最新版（24h 内同步过则跳过）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            WordlistStore.shared.refreshIfStale()
+        }
+
+        // 全局快捷键 ⌃⌥⌘V：粘贴上一段。开关在触发时才检查 ——
+        // 设置页切换立即生效，不用重注册
+        PasteLastHotkey.shared.onTrigger = { [weak self] in
+            guard let self, self.state.config.pasteLastHotkeyEnabled else { return }
+            self.pasteLastTranscript()
+        }
+        PasteLastHotkey.shared.register()
+
         // 首次启动（或还没配好 Key）走欢迎引导；否则直接进主界面。
         // 无论走哪条，都必须开一个窗口 —— 菜单栏 App 什么都不弹的话，
         // 用户会以为「装了但没打开」。
@@ -554,6 +567,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         open.target = self
         menu.addItem(open)
 
+        // 粘贴上一段：Secure Input / 注入失败 / 手滑清空时的兜底入口
+        let paste = NSMenuItem(title: "粘贴上一段（⌃⌥⌘V）",
+                               action: #selector(pasteLastFromMenu), keyEquivalent: "")
+        paste.target = self
+        menu.addItem(paste)
+
         if let v = state.updateAvailable {
             let up = NSMenuItem(title: "⬆️ 升级到 \(v)…",
                                 action: #selector(installUpdateFromMenu), keyEquivalent: "")
@@ -570,6 +589,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openMain() { mainWindow.show() }
+
+    // MARK: - 粘贴上一段
+
+    /// 菜单点击要等菜单收起、焦点回到目标 App 再粘，否则可能粘错地方
+    @objc private func pasteLastFromMenu() { pasteLastTranscript(afterDelay: 0.25) }
+
+    private func pasteLastTranscript(afterDelay delay: Double = 0) {
+        guard let r = HistoryStore.shared.records.first else {
+            hud.flash(message: "还没有识别记录，先说一句吧", duration: 1.4)
+            return
+        }
+        // 润色过的用润色版；末尾句号策略跟当初上屏时保持一致
+        let raw = r.polishedText ?? r.text
+        let text = state.config.stripTrailingPeriod
+            ? TextPolish.stripTrailingPeriod(raw) : raw
+        guard !text.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            switch TextInjector.commit(text, config: self.state.config) {
+            case .injected:
+                self.hud.flash(message: "已粘贴上一段（\(text.count) 字）", duration: 1.2)
+            case .copiedOnly(let reason):
+                self.hud.flash(message: "已复制到剪贴板 —— \(reason)", duration: 2.0)
+            }
+        }
+    }
 
     // MARK: - 软件更新
 

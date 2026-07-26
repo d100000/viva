@@ -400,6 +400,12 @@ struct TranscriptPane: View {
             HStack(spacing: 10) {
                 PolishToggle()
 
+                // 改词记忆：用户刚改完一处错字 —— 这是学规则的最佳时机。
+                // 从 committed→edited 的 diff 里提取「一处简单替换」，点一下永久生效。
+                if let sug = suggestion {
+                    RememberFixChip(rule: sug)
+                }
+
                 if polishing {
                     HStack(spacing: 5) {
                         ProgressView().controlSize(.small).scaleEffect(0.7)
@@ -461,6 +467,46 @@ struct TranscriptPane: View {
     }
 
     private var finalText: String { edited.isEmpty ? committed : edited }
+
+    /// 编辑态下且 diff 是一处简单替换时才提示。已在规则表里的不再重复提示。
+    private var suggestion: ReplaceRule? {
+        guard editable, !edited.isEmpty, !committed.isEmpty else { return nil }
+        guard let s = TextReplacer.suggest(original: committed, edited: edited) else { return nil }
+        guard !AppState.shared.config.replaceRules.contains(where: { $0.from == s.from }) else { return nil }
+        return s
+    }
+}
+
+/// 「记住 X→Y」小胶囊。点一下写进替换词表，以后每一句自动纠正。
+private struct RememberFixChip: View {
+    let rule: ReplaceRule
+    @State private var saved = false
+
+    var body: some View {
+        Button {
+            let state = AppState.shared
+            var rules = state.config.replaceRules.filter { $0.from != rule.from }
+            rules.append(rule)
+            state.config.replaceRules = rules
+            state.commitField { $0.replaceRules = rules }
+            state.onReloadConfig?()
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { saved = true }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: saved ? "checkmark" : "lightbulb")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text(saved ? "已记住" : "记住 \(rule.from)→\(rule.to)")
+                    .font(.system(size: 11)).lineLimit(1)
+            }
+            .foregroundStyle(saved ? Color.green : Color.orange)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill((saved ? Color.green : Color.orange).opacity(0.12)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(saved)
+        .help("以后识别出「\(rule.from)」都会自动替换成「\(rule.to)」，可在词库页管理")
+    }
 }
 
 /// 流式文本：**只对新增的那一段做淡入**，已经稳定的部分完全不动。

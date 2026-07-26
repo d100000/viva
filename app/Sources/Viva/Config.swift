@@ -49,6 +49,21 @@ struct Config: Codable {
     var stripTrailingPeriod: Bool = true
     /// 热词直传，双向流式限 100 tokens
     var hotwords: [String] = []
+    /// 启用的预设词库 id（见 WordlistStore.knownIds）。默认启用 IT 库 ——
+    /// 本产品的目标人群就是开发者，且词库页一眼可关。用户词永远排在预设词前面。
+    var enabledWordlists: [String] = ["it"]
+    /// 确定性替换规则（改词记忆）。definite/partial 都过一遍，热词纠不动的靠它。
+    var replaceRules: [ReplaceRule] = []
+
+    /// 中文输出变体：""=简体（默认）/ traditional=繁体 / tw=台湾正体 / hk=香港繁体
+    var zhVariant: String = ""
+    /// 极速模式：enable_accelerate_text，首字更快但首字准确率下降。
+    /// UI 上必须讲清代价，默认关。
+    var accelerateFirstChar: Bool = false
+
+    /// 全局快捷键 ⌃⌥⌘V：把上一段识别结果粘贴到当前光标处。
+    /// Secure Input / 注入失败 / 手滑清空时的唯一兜底。
+    var pasteLastHotkeyEnabled: Bool = true
 
     // ── 交互 ──
     /// 按住说话的键码。54 = 右 Command。
@@ -182,6 +197,11 @@ struct Config: Codable {
         enableDdc = b(.enableDdc, def.enableDdc)
         stripTrailingPeriod = b(.stripTrailingPeriod, def.stripTrailingPeriod)
         hotwords = (try? c.decodeIfPresent([String].self, forKey: .hotwords)).flatMap { $0 } ?? def.hotwords
+        enabledWordlists = (try? c.decodeIfPresent([String].self, forKey: .enabledWordlists)).flatMap { $0 } ?? def.enabledWordlists
+        replaceRules = (try? c.decodeIfPresent([ReplaceRule].self, forKey: .replaceRules)).flatMap { $0 } ?? def.replaceRules
+        zhVariant = s(.zhVariant, def.zhVariant)
+        accelerateFirstChar = b(.accelerateFirstChar, def.accelerateFirstChar)
+        pasteLastHotkeyEnabled = b(.pasteLastHotkeyEnabled, def.pasteLastHotkeyEnabled)
         hotkeyKeyCode = (try? c.decodeIfPresent(Int64.self, forKey: .hotkeyKeyCode)).flatMap { $0 } ?? def.hotkeyKeyCode
         hotkeyIsModifierOnly = b(.hotkeyIsModifierOnly, def.hotkeyIsModifierOnly)
         hotkeyModifiers = (try? c.decodeIfPresent(UInt64.self, forKey: .hotkeyModifiers)).flatMap { $0 } ?? def.hotkeyModifiers

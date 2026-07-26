@@ -59,6 +59,10 @@ HotkeyManager(CGEventTap 捕获右⌘, 双击=锁定连续听写)
       ├── AudioCapture      AVAudioEngine 采集 + 48k→16k 重采样 + 环形预缓冲(preRoll 防首字丢失)
       ├── DoubaoStreamingASR WebSocket 客户端 ←→ SaucProtocol(豆包二进制协议编解码)
       ├── PartialCommitter  连续听写: partial 稳定前缀逐段上屏(见 09 号方案, 润色时旁路)
+      ├── TextReplacer      确定性替换(改词记忆): definite/partial 在 handle() 入口统一过规则
+      ├── WordlistStore     预设词库: 数据源=仓库根 wordlists/*.json, 构建时打进 Resources 兜底,
+      │                     运行时每 24h 从 GitHub raw 拉新版缓存到 data/wordlists/(改仓库文件=全网生效)
+      ├── PasteLastHotkey   ⌃⌥⌘V 全局粘贴上一段(Carbon RegisterEventHotKey, 无需任何权限)
       ├── LLMPolisher       可选润色, 走 LLMProvider(各家 OpenAI 兼容预设) + APIFormat
       ├── TextInjector      剪贴板+⌘V 或 CGEvent 逐字, 含 Secure Input 检测
       ├── HUDController     悬浮条, partial 逐字显示 / definite 定格
