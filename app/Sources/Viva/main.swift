@@ -160,6 +160,9 @@ func loadAsPCM16k(url: URL) throws -> Data {
 
 let args = CommandLine.arguments
 
+// 越早装越好：初始化阶段的崩溃也要能留下记录
+CrashReporter.install()
+
 if args.contains("--help") || args.contains("-h") {
     print("""
     豆包流式语音输入
