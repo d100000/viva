@@ -24,7 +24,7 @@ else B=""; D=""; R=""; fi
 say()  { printf '%s▸%s %s\n' "$D" "$R" "$1"; }
 die()  { printf '\n✖ %s\n' "$1" >&2; exit 1; }
 
-printf '\n%sViva%s —— 别打了，说吧\n\n' "$B" "$R"
+printf '\n%sViva%s —— 话音未落，字已上屏\n\n' "$B" "$R"
 
 # ── 环境检查 ──────────────────────────────────────────────────────
 [ "$(uname -s)" = "Darwin" ] || die "Viva 只支持 macOS。"

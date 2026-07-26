@@ -2,11 +2,11 @@
 
 # Viva
 
-**别打了，说吧。**
+**话音未落，字已上屏。**
 
-`Type at the speed of speech.`
+`Faster than your keyboard.`
 
-macOS 语音输入工具 · 对接火山引擎豆包流式语音识别 · 按住热键说话，文字实时出现在光标处
+最快的 macOS 语音输入 · 顶级豆包流式识别大模型驱动 · 按住说话，首字亚秒级返回，边说边写进光标处
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh | bash

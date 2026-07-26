@@ -69,10 +69,10 @@ struct WelcomeView: View {
                 VStack(spacing: 5) {
                     Text("Viva")
                         .font(.system(size: 34, weight: .semibold, design: .rounded))
-                    Text("别打了，说吧。")
+                    Text("话音未落，字已上屏。")
                         .font(.system(size: 16))
                         .foregroundStyle(.secondary)
-                    Text("Type at the speed of speech.")
+                    Text("Faster than your keyboard.")
                         .font(.system(size: 11.5, weight: .medium, design: .rounded))
                         .foregroundStyle(.tertiary)
                         .textCase(.uppercase)
