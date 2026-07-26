@@ -8,6 +8,10 @@
 
 macOS 语音输入工具 · 对接火山引擎豆包流式语音识别 · 按住热键说话，文字实时出现在光标处
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh | bash
+```
+
 </div>
 
 ---
@@ -26,22 +30,95 @@ macOS 语音输入工具 · 对接火山引擎豆包流式语音识别 · 按住
 
 ---
 
-## 快速开始
+## 安装
+
+需要 **macOS 14 (Sonoma) 或更高**，Apple Silicon。
+
+### 方式一：终端一条命令（推荐）
 
 ```bash
-cd app
+curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh | bash
+```
+
+脚本会查最新版本、下载、去掉 Gatekeeper 隔离属性、装进 `/Applications`。装完：
+
+```bash
+open -a Viva
+```
+
+<details>
+<summary>可选的环境变量</summary>
+
+```bash
+# 装到用户目录（不需要 sudo 写 /Applications）
+curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh \
+  | VIVA_PREFIX="$HOME/Applications" bash
+
+# 装指定版本
+curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh \
+  | VIVA_VERSION=v0.4.0 bash
+
+# 用已经下载好的包装（网络差时有用）
+VIVA_ZIP=~/Downloads/Viva-0.4.0.zip ./install.sh
+```
+
+重复执行是安全的：已经是最新版会直接退出，升级时会先退掉正在运行的旧版本。
+
+</details>
+
+### 方式二：Homebrew
+
+```bash
+brew install --cask d100000/tap/viva
+```
+
+升级 `brew upgrade --cask viva`，卸载 `brew uninstall --cask viva`。
+卸载默认**保留** `~/.config/viva/`（里面有你的 API Key 和历史记录），要一起清掉用 `brew uninstall --zap --cask viva`。
+
+### 方式三：手动下载
+
+去 [Releases](https://github.com/d100000/viva/releases) 下 `Viva-x.y.z.dmg`，双击打开，把 Viva 拖进 Applications。
+
+**然后必须在终端跑这一条**，否则双击会提示「已损坏，应移到废纸篓」：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Viva.app
+```
+
+> ### ⚠️ 为什么需要这一步
+>
+> Viva 是 **ad-hoc 签名**的 —— 我没有花 99 美元/年买 Apple 开发者证书，所以没法做公证（notarization）。macOS 会给一切从网上下载的文件打上 `com.apple.quarantine`，未公证的 App 带着这个属性就会被 Gatekeeper 拦死，而且提示语是「已损坏」，非常误导人 —— 它没损坏，只是没证书。
+>
+> 上面的**方式一和方式二已经自动处理了这一步**，只有手动下载才需要自己敲。
+>
+> 不放心的话，用方式四从源码自己编译，一行代码都能审。
+
+### 方式四：从源码编译
+
+只需要 Command Line Tools，不用装完整 Xcode：
+
+```bash
+git clone https://github.com/d100000/viva.git
+cd viva/app
 ./build.sh
 open "dist/Viva.app"
 ```
 
+---
+
+## 快速开始
+
 首次启动会走欢迎引导：填 API Key → 麦克风授权 → 辅助功能授权 → 试一句。
+
+> 授权「辅助功能」后**必须重启 App**，热键才生效。
 
 **建议先跑协议自检**（不需要任何权限，能把「协议/凭证」和「App 权限」两个风险源分开）：
 
 ```bash
 export DOUBAO_API_KEY=你的火山APIKey
 say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的接入方案"
-.build/release/Viva --selftest /tmp/t.aiff
+# 从源码编译的话用 .build/release/Viva，装好的用下面这条
+/Applications/Viva.app/Contents/MacOS/Viva --selftest /tmp/t.aiff
 ```
 
 详见 [app/README.md](app/README.md)。
@@ -104,9 +181,12 @@ say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的
 ```
 .
 ├── app/                      # macOS App（Swift + SwiftPM，无需 Xcode）
-│   ├── Sources/Viva/         # 22 个源文件，约 5700 行
+│   ├── Sources/Viva/         # 26 个源文件，约 8300 行
 │   ├── tools/make_icon.swift # 图标生成器（CoreGraphics 直接画）
-│   └── build.sh              # 编译 + 组装 .app + ad-hoc 签名
+│   ├── build.sh              # 编译 + 组装 .app + ad-hoc 签名
+│   └── package.sh            # 打发布用的 DMG + ZIP
+├── install.sh                # 终端一键安装脚本
+├── packaging/homebrew/        # Homebrew cask 公式
 └── 0X-*.md                   # 调研与设计文档（见下）
 ```
 
