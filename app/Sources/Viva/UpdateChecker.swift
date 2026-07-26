@@ -6,9 +6,9 @@ import AppKit
 /// 不用 Sparkle：它要 appcast.xml + EdDSA 签名一整套基建，而本项目「无第三方依赖」。
 /// GitHub Releases API 本身就是现成的 feed，ZIP 就是现成的包 —— 少一层东西少一层坑。
 ///
-/// ⚠️ 已知代价（ad-hoc 签名的老问题）：更新后签名身份变化，TCC 会掉「辅助功能」授权，
-///   热键要等用户去系统设置移除重加才恢复。App 已有每 2 秒的权限复查和引导 UI 兜底，
-///   更新流程里的文案也必须把这件事说在前面 —— 静默吃掉授权是最差的体验。
+/// 签名是固定自签证书（make-signing-cert.sh）：DR = certificate leaf，更新前后不变，
+/// TCC 的「辅助功能」授权跨更新保留。历史上 ad-hoc 时代每次更新都会掉授权，
+/// App 每 2 秒的权限复查 + 引导 UI 就是那时的兜底，现在保留 —— 防证书丢失回退 ad-hoc。
 @MainActor
 final class UpdateChecker {
 

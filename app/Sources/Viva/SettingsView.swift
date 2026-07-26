@@ -839,7 +839,7 @@ struct SettingsView: View {
                             }
                         }
                         Label {
-                            Text("更新来源是 [GitHub Releases](https://github.com/d100000/viva/releases)，下载后校验版本、原地替换并自动重启。⚠️ 由于 Viva 是 ad-hoc 签名（没有开发者证书），**每次更新后「辅助功能」授权会失效** —— 去 系统设置 → 隐私与安全性 → 辅助功能 把 Viva 移除再重新添加，热键即恢复，无需重启。")
+                            Text("更新来源是 [GitHub Releases](https://github.com/d100000/viva/releases)，下载后校验版本、原地替换并自动重启。所有版本用同一张固定证书签名，**更新后「辅助功能」授权保持有效**，无需重新添加。")
                         } icon: { Image(systemName: "arrow.triangle.2.circlepath") }
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

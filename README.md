@@ -32,7 +32,16 @@ curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh | bash
 
 ## 安装
 
-需要 **macOS 14 (Sonoma) 或更高**，Apple Silicon。
+需要 **macOS 14 (Sonoma) 或更高**，Apple Silicon（Intel 需 Rosetta，未实测）。
+
+四种方式任选其一：
+
+| 方式 | 一句话 | Gatekeeper「已损坏」问题 |
+|---|---|---|
+| **① 一键脚本**（推荐） | 一条 `curl \| bash`，自动装最新版 | 脚本自动处理 ✅ |
+| **② Homebrew** | `brew install --cask d100000/tap/viva` | cask 自动处理 ✅ |
+| **③ 手动下载** | Releases 页下 DMG 拖进应用程序 | 需手动跑一条命令 ⚠️ |
+| **④ 源码编译** | `git clone` + `./build.sh` | 不涉及（本机构建无隔离属性）✅ |
 
 ### 方式一：终端一条命令（推荐）
 
@@ -56,10 +65,10 @@ curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh \
 
 # 装指定版本
 curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh \
-  | VIVA_VERSION=v0.4.0 bash
+  | VIVA_VERSION=v0.8.0 bash
 
 # 用已经下载好的包装（网络差时有用）
-VIVA_ZIP=~/Downloads/Viva-0.4.0.zip ./install.sh
+VIVA_ZIP=~/Downloads/Viva-0.8.0.zip ./install.sh
 ```
 
 重复执行是安全的：已经是最新版会直接退出，升级时会先退掉正在运行的旧版本。
@@ -87,9 +96,9 @@ xattr -dr com.apple.quarantine /Applications/Viva.app
 
 > ### ⚠️ 为什么需要这一步
 >
-> Viva 是 **ad-hoc 签名**的 —— 我没有花 99 美元/年买 Apple 开发者证书，所以没法做公证（notarization）。macOS 会给一切从网上下载的文件打上 `com.apple.quarantine`，未公证的 App 带着这个属性就会被 Gatekeeper 拦死，而且提示语是「已损坏」，非常误导人 —— 它没损坏，只是没证书。
+> Viva 用**自签证书**签名 —— 我没有花 99 美元/年买 Apple 开发者证书，所以没法做公证（notarization）。macOS 会给一切从网上下载的文件打上 `com.apple.quarantine`，未公证的 App 带着这个属性就会被 Gatekeeper 拦死，而且提示语是「已损坏」，非常误导人 —— 它没损坏，只是没有 Apple 的证书链。
 >
-> 上面的**方式一和方式二已经自动处理了这一步**，只有手动下载才需要自己敲。
+> 上面的**方式一和方式二已经自动处理了这一步**，只有手动下载才需要自己敲。不想敲命令也可以：双击被拦后，去 系统设置 → 隐私与安全性，页面下方会出现「仍要打开」。
 >
 > 不放心的话，用方式四从源码自己编译，一行代码都能审。
 
@@ -102,6 +111,29 @@ git clone https://github.com/d100000/viva.git
 cd viva/app
 ./build.sh
 open "dist/Viva.app"
+```
+
+### 更新
+
+装好之后**不用管**：Viva 启动时和之后每 24 小时检查一次 [GitHub Releases](https://github.com/d100000/viva/releases)，「启动时自动更新到新版本」（设置 → 软件更新，默认开启）会在空闲时自动下载、校验、原地替换并重启；正在说话/润色时绝不动刀。关掉自动更新的话，发现新版时菜单栏会出现「⬆️ 升级」入口，设置页也有「检查更新」按钮。
+
+其它方式装的同样可以手动升级：
+
+```bash
+brew upgrade --cask viva        # Homebrew 装的
+# 或重跑一遍一键脚本（已是最新会直接退出，升级时自动退掉旧版本）
+curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh | bash
+```
+
+所有版本都用同一张固定证书签名，**更新后「辅助功能」授权保持有效**，不需要去系统设置里移除重加。
+
+### 卸载
+
+```bash
+brew uninstall --cask viva      # Homebrew；加 --zap 连同 ~/.config/viva 一起清
+# 手动装的：
+rm -rf /Applications/Viva.app
+rm -rf ~/.config/viva           # 可选：配置、API Key、识别历史都在这里面
 ```
 
 ---
@@ -183,7 +215,8 @@ say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的
 ├── app/                      # macOS App（Swift + SwiftPM，无需 Xcode）
 │   ├── Sources/Viva/         # 26 个源文件，约 8300 行
 │   ├── tools/make_icon.swift # 图标生成器（CoreGraphics 直接画）
-│   ├── build.sh              # 编译 + 组装 .app + ad-hoc 签名
+│   ├── build.sh              # 编译 + 组装 .app + 签名（固定自签证书，缺证书才回退 ad-hoc）
+│   ├── make-signing-cert.sh  # 生成/恢复固定自签证书（授权跨更新保留的关键，跑一次即可）
 │   └── package.sh            # 打发布用的 DMG + ZIP
 ├── install.sh                # 终端一键安装脚本
 ├── packaging/homebrew/        # Homebrew cask 公式
@@ -215,5 +248,4 @@ say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的
 
 - **不是逐字上屏**。中间结果只在悬浮条预览，写进输入框的最小单位是**一句**。真·逐字上屏需要 InputMethodKit 输入法形态，见 [04 章 §6](04-技术实现方案.md)。
 - **绝不做退格回改**。算错一次就会不可逆地删掉用户自己的文字。
-- macOS 14+，仅 ad-hoc 签名（辅助功能与沙盒不兼容，上不了 App Store）。
-- ⚠️ 重新编译后 TCC 授权可能失效（ad-hoc 签名会变），需在系统设置里移除再重新添加。
+- macOS 14+，自签证书签名，无公证 —— 下载的包首次打开要过一次 Gatekeeper（见[安装](#安装)），且上不了 App Store（辅助功能与沙盒也不兼容）。签名身份固定，**更新/重编译不会丢「辅助功能」授权**。
