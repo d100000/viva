@@ -45,7 +45,12 @@ VIVA_PREFIX=$(mktemp -d) VIVA_ZIP=app/dist/Viva-0.4.0.zip ./install.sh
 3. 提交源码 → 打 tag `vX.Y.Z` → `gh release create` 挂上 DMG + ZIP
 4. DMG 的 sha256 填进 `packaging/homebrew/viva.rb`，再同步到 `d100000/homebrew-tap` 仓库的 `Casks/viva.rb`
 
-**发版规则**：只有用户明确要求时才打包发 Release；平时只提交源码，`dist/` 已在 .gitignore 里，不入库。
+**发版规则（2026-07-27 起：每次提交自动发版）**：
+
+1. **每次提交源码都同步升版本号并生成新的软件包**：`feat` 提交升 minor（0.9.0 → 0.10.0），`fix`/`docs`/`chore` 升 patch（0.9.0 → 0.9.1）；`CFBundleVersion` 单调 +1。版本号变更和源码放在**同一个 commit** 里。
+2. **自动发 Release**：commit 后立刻打 tag `vX.Y.Z` → push → `gh release create` 挂 DMG + ZIP（Release notes 用中文概述本次改动），再把 DMG sha256 同步进 cask。
+3. 一轮改动里多个 commit 连续产生时，可以攒到该轮收尾一次性发版（版本号只升一级），避免十分钟内发五个版本刷爆用户的自动更新。
+4. `dist/` 仍不入库。`gh` 未登录/网络不通时降级：只提交源码 + 提醒用户 Release 未发，等条件恢复补发。
 
 ## 架构
 
