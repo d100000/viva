@@ -94,7 +94,9 @@ final class DoubaoStreamingASR: NSObject {
         audioPacketCount += 1
         let frame = Sauc.audioRequest(pcm: audio, isLast: false)
         task?.send(.data(frame)) { [weak self] err in
-            if let err { self?.fail("发送音频失败：\(err.localizedDescription)") }
+            if let err {
+                Task { @MainActor in self?.failOrDiagnose(err, context: "发送音频失败") }
+            }
         }
     }
 
@@ -190,7 +192,9 @@ final class DoubaoStreamingASR: NSObject {
             fail("首包 JSON 序列化失败"); return
         }
         task?.send(.data(Sauc.fullClientRequest(json: json))) { [weak self] err in
-            if let err { self?.fail("发送首包失败：\(err.localizedDescription)") }
+            if let err {
+                Task { @MainActor in self?.failOrDiagnose(err, context: "发送首包失败") }
+            }
         }
     }
 
@@ -205,6 +209,11 @@ final class DoubaoStreamingASR: NSObject {
                 if self.didSendLastPacket {
                     if !self.didFinish { self.finishUp(self.lastPartial) }
                 } else if self.state != .closed {
+                    // 从没握手成功 + badServerResponse = 服务端拒绝了握手（非 101）。
+                    if !self.didConnect, (err as? URLError)?.code == .badServerResponse {
+                        self.failOrDiagnose(err, context: "连接被拒")
+                        return
+                    }
                     // 按错误类型给可自查的提示，而不是笼统一句「连接中断」
                     let hint: String
                     if let u = err as? URLError {
@@ -325,6 +334,62 @@ final class DoubaoStreamingASR: NSObject {
         task = nil
         session?.finishTasksAndInvalidate()
         session = nil
+    }
+
+    /// 统一入口:握手从未成功且是 badServerResponse → 走二次诊断,否则直接 fail。
+    /// send/receive 两条路都可能先撞到这类错误(哪边先收到取决于时序)。
+    private func failOrDiagnose(_ err: Error, context: String) {
+        guard state != .closed, !didFinish else { return }
+        if !didConnect, (err as? URLError)?.code == .badServerResponse {
+            // send 和 receive 的失败回调可能先后都到,探测只发一次
+            guard !diagnosing else { return }
+            diagnosing = true
+            diagnoseHandshakeRejection(fallback: err)
+        } else {
+            fail("\(context)：\(err.localizedDescription)")
+        }
+    }
+
+    private var diagnosing = false
+
+    /// 握手被拒（非 101）时的二次诊断。WebSocket 拒绝响应的状态码和 body
+    /// URLSession 一概不给看,只报一句 badServerResponse —— 这里用同一套鉴权头
+    /// 发一次普通 HTTPS 请求,把服务端的真实拒绝原因拿回来分诊:
+    ///   401 "Invalid X-Api-Key"        → key 本身填错/被删
+    ///   403 "resource not granted"    → key 有效,但没开通流式语音识别 2.0(最高频)
+    /// 探测费用为零(不会建立识别会话),只在失败路径走一次。
+    private func diagnoseHandshakeRejection(fallback err: Error) {
+        guard var comps = URLComponents(string: config.endpoint) else {
+            fail("连接中断：\(err.localizedDescription)"); return
+        }
+        comps.scheme = "https"
+        guard let url = comps.url else {
+            fail("连接中断：\(err.localizedDescription)"); return
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 6
+        for (k, v) in config.authHeaders(requestId: UUID().uuidString,
+                                         connectId: UUID().uuidString) {
+            req.setValue(v, forHTTPHeaderField: k)
+        }
+        let rid = config.resourceId
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                let logid = (resp as? HTTPURLResponse)?
+                    .value(forHTTPHeaderField: "X-Tt-Logid") ?? ""
+                Log.error("握手被拒诊断：HTTP \(code)  \(body)  [logid=\(logid)]")
+                if code == 403 || body.contains("not granted") {
+                    self.fail("API Key 有效，但还没开通「豆包流式语音识别大模型」（服务未授权）。去火山引擎控制台 → 语音技术 → 豆包流式语音识别，开通模型 2.0 后即可使用（有免费额度）。资源 ID：\(rid)")
+                } else if code == 401 {
+                    self.fail("API Key 无效或已被删除。请在火山引擎控制台重新创建一个 API Key 并填入设置。")
+                } else {
+                    self.fail("服务端拒绝了连接（HTTP \(code)）：\(body.isEmpty ? err.localizedDescription : body)")
+                }
+            }
+        }.resume()
     }
 
     private func fail(_ message: String) {

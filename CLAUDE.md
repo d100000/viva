@@ -113,5 +113,5 @@ main.swift —— 入口 + --selftest 模式
 - **自签/ad-hoc 签名 ⇒ 无法公证 ⇒ 下载的包仍被 Gatekeeper 拦**，提示「已损坏」（误导人，其实只是没 Apple 证书链）。固定自签证书解决的是 TCC 重复授权，**不解决** Gatekeeper——那需要 Developer ID + 公证（$99/年，将来 `export VIVA_SIGN_IDENTITY="Developer ID Application: …"` 即可切换，build.sh 无需改）。所以 `install.sh` 和 cask 的 `postflight` 仍必须 `xattr -dr com.apple.quarantine`，这一步是承重的，删了用户就打不开 App。`spctl -a` 对本 App 永远返回 rejected，但 App 实际能正常启动 —— 别拿 spctl 当验证标准。
 - **`ditto -c -k` 别加 `--sequesterRsrc`**：那个参数是**生成** `__MACOSX/` 的元凶（Apple 公证文档里带它，那是给 notary service 用的）。本项目要给端用户干净的包，不加。
 - **`ps -eo comm=` 会按列宽截断路径**，只有 `ps -p <pid> -o comm=` 给完整路径；且它报物理路径（`/private/var/…`），跟符号链接路径比较前两边都要 `cd && pwd -P` 解析。install.sh 靠这个判断「该退掉的是不是正要被替换的那个进程」。
-- 豆包错误码：`45000001` 协议/参数非法；`45000081` 建连后太久没喂音频。排障带上启动时打印的 `logid`。
+- 豆包错误码：`45000001` 协议/参数非法；`45000081` 建连后太久没喂音频。排障带上启动时打印的 `logid`。**WebSocket 握手被拒时 URLSession 只报 badServerResponse、看不到状态码** —— DoubaoStreamingASR 会用同一套鉴权头发一次 HTTPS 探测分诊：401 `Invalid X-Api-Key`（key 错）/ 403 `resource not granted`（key 有效但没开通模型 2.0，新账号建了 key 不开通就是这个，最高频死路）。
 - `app/README.md` 部分内容仍是旧名「DoubaoVoiceInput」时期的（旧配置路径 `~/.config/doubao-voice` 等），以源码和根 README 为准。

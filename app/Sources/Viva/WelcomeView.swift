@@ -97,7 +97,7 @@ struct WelcomeView: View {
 
                     StepCard(index: 1, done: state.config.hasCredentials,
                              title: "填入火山引擎 API Key",
-                             detail: "需要先在控制台开通「豆包流式语音识别模型 2.0」。约 1 元/小时，按你实际说话时长计费。",
+                             detail: "⚠️ 只建 Key 不够 —— 需要先在控制台**开通「豆包流式语音识别大模型」**（新账号有免费额度），再创建 API Key。没开通的 Key 连接会被拒绝。约 1 元/小时，按实际说话时长计费。",
                              editable: true) {
                         VStack(alignment: .leading, spacing: 7) {
                             HStack {
@@ -201,6 +201,15 @@ struct WelcomeView: View {
 
                     if !state.lastError.isEmpty {
                         WarnBanner(text: state.lastError, tint: .red)
+                        // 没开通模型的死路要给梯子:错误文案里点名「开通」时,
+                        // 直接给按钮去控制台,别让用户自己翻文档找入口
+                        if state.lastError.contains("开通") {
+                            Button("去火山引擎控制台开通（有免费额度）") {
+                                NSWorkspace.shared.open(
+                                    URL(string: "https://console.volcengine.com/speech/app")!)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
                     }
                 }
                 .padding(22)
