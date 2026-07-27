@@ -380,10 +380,22 @@ struct TranscriptPane: View {
                     ScrollView {
                         Group {
                             if isEmpty {
-                                Text(error.isEmpty ? "说的话会实时出现在这里" : error)
-                                    .foregroundStyle(error.isEmpty
-                                                     ? Color.secondary.opacity(0.5) : Color.orange)
-                                    .frame(maxWidth: .infinity)
+                                VStack(spacing: 8) {
+                                    Text(error.isEmpty ? "说的话会实时出现在这里" : error)
+                                        .foregroundStyle(error.isEmpty
+                                                         ? Color.secondary.opacity(0.5) : Color.orange)
+                                        .frame(maxWidth: .infinity)
+                                    // 服务未开通的死路必须当场给梯子:主界面是过了引导后
+                                    // 唯一能看到这个错的地方,只有红字没有按钮等于让用户自己去搜
+                                    if error.contains("开通") {
+                                        Button("去火山引擎控制台开通（有免费额度）") {
+                                            NSWorkspace.shared.open(
+                                                URL(string: "https://console.volcengine.com/speech/app")!)
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .controlSize(.small)
+                                    }
+                                }
                             } else {
                                 StreamingText(committed: committed, partial: partial)
                             }
