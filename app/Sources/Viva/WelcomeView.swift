@@ -48,13 +48,10 @@ struct VivaMark: View {
 struct WelcomeView: View {
     @ObservedObject var state = AppState.shared
     @State private var pressing = false
-    @State private var keyDraft = ""
-    /// Key 输入框的呼吸高亮 —— 全流程唯一必须手动填写的东西，把视线拉过去
-    @State private var keyGlow = false
     var onFinish: () -> Void
 
     private var stepsDone: Int {
-        [state.config.hasCredentials, state.micGranted, state.axGranted]
+        [state.accountProfile != nil, state.micGranted, state.axGranted]
             .filter { $0 }.count
     }
 
@@ -95,50 +92,15 @@ struct WelcomeView: View {
                             .foregroundStyle(stepsDone == 3 ? Color.green : .secondary)
                     }
 
-                    StepCard(index: 1, done: state.config.hasCredentials,
-                             title: "填入火山引擎 API Key",
-                             detail: "⚠️ 只建 Key 不够 —— 需要先在控制台**开通「豆包流式语音识别大模型」**（新账号有免费额度），再创建 API Key。没开通的 Key 连接会被拒绝。约 1 元/小时，按实际说话时长计费。",
-                             editable: true) {
-                        VStack(alignment: .leading, spacing: 7) {
-                            HStack {
-                                SecureField("控制台的 x-api-key", text: $keyDraft)
-                                    .textFieldStyle(.roundedBorder)
-                                    // ⭐ 高亮：Key 是整个引导里唯一必须亲手填的东西。
-                                    //    未填之前套一圈呼吸的主色光环，把视线钉在这里。
-                                    .overlay {
-                                        if !state.config.hasCredentials {
-                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                                .strokeBorder(
-                                                    Color.accentColor.opacity(keyGlow ? 0.95 : 0.4),
-                                                    lineWidth: 2)
-                                                .shadow(color: Color.accentColor
-                                                    .opacity(keyGlow ? 0.5 : 0.12),
-                                                        radius: keyGlow ? 7 : 2)
-                                                .animation(.easeInOut(duration: 1.1)
-                                                    .repeatForever(autoreverses: true),
-                                                           value: keyGlow)
-                                                .allowsHitTesting(false)
-                                        }
-                                    }
-                                Button("保存") {
-                                    state.config.apiKey = keyDraft
-                                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                                    state.saveConfig()
-                                    state.onReloadConfig?()
-                                }
-                                .disabled(keyDraft.trimmingCharacters(in: .whitespaces).isEmpty)
-                            }
-                            Button("打开火山引擎控制台") {
-                                NSWorkspace.shared.open(
-                                    URL(string: "https://console.volcengine.com/speech/new/setting/apikeys?projectName=default")!)
-                            }
-                            .buttonStyle(.link)
-                        }
-                    }
+                    AccountView(
+                        client: ManagedBackendAuth.shared,
+                        showsDeveloperCode: state.config.testModeEnabled,
+                        onProfileChange: { state.accountProfile = $0 }
+                    )
 
                     StepCard(index: 2, done: state.micGranted,
                              title: "允许使用麦克风",
-                             detail: "音频只发往你自己配置的火山账号，不经过任何第三方服务器。") {
+                             detail: "用于采集语音。音频会加密传输到 Viva 服务，再由服务端转发到已配置的语音识别供应商。") {
                         Button("打开系统设置") {
                             openPrivacy("Privacy_Microphone")
                         }
@@ -146,14 +108,16 @@ struct WelcomeView: View {
 
                     StepCard(index: 3, done: state.axGranted,
                              title: "允许辅助功能",
-                             detail: "用于监听全局热键，以及把识别出的文字写进当前光标处。⚠️ 授权后需要重启本应用才会生效。") {
+                             detail: "用于监听全局热键，以及把识别出的文字写进当前光标处。授权后 Viva 会自动检测；若仍未生效，可在设置中重新检查或重启应用。") {
                         Button("打开系统设置") {
                             openPrivacy("Privacy_Accessibility")
                         }
                     }
 
                     // ── 试一句 ──
-                    if state.config.hasCredentials, state.micGranted {
+                    if state.accountProfile != nil,
+                       state.config.hasValidBackendConfiguration,
+                       state.micGranted {
                         Divider().padding(.vertical, 2)
                         VStack(alignment: .leading, spacing: 9) {
                             Text("试一句").font(.headline)
@@ -179,16 +143,20 @@ struct WelcomeView: View {
                                     .contentShape(Capsule())
                                     .gesture(
                                         DragGesture(minimumDistance: 0)
-                                            .onChanged { _ in
-                                                guard !pressing else { return }
-                                                pressing = true
-                                                state.onTestStart?()
-                                            }
-                                            .onEnded { _ in
-                                                guard pressing else { return }
-                                                pressing = false
-                                                state.onTestStop?()
-                                            })
+                                            .onChanged { _ in beginTestPress() }
+                                            .onEnded { _ in endTestPress() })
+                                    .accessibilityElement(children: .ignore)
+                                    .accessibilityLabel("按住试说")
+                                    .accessibilityValue(pressing ? "正在试听" : "未开始")
+                                    .accessibilityHint("VoiceOver 激活一次开始试听，再激活一次结束")
+                                    .accessibilityAddTraits(.isButton)
+                                    .accessibilityAction {
+                                        if pressing {
+                                            endTestPress()
+                                        } else {
+                                            beginTestPress()
+                                        }
+                                    }
                                 if let ms = state.firstCharMs {
                                     Text("首字 \(ms) ms")
                                         .font(.caption).foregroundStyle(.secondary)
@@ -201,15 +169,6 @@ struct WelcomeView: View {
 
                     if !state.lastError.isEmpty {
                         WarnBanner(text: state.lastError, tint: .red)
-                        // 没开通模型的死路要给梯子:错误文案里点名「开通」时,
-                        // 直接给按钮去控制台,别让用户自己翻文档找入口
-                        if state.lastError.contains("开通") {
-                            Button("去火山引擎控制台开通（有免费额度）") {
-                                NSWorkspace.shared.open(
-                                    URL(string: "https://console.volcengine.com/speech/app")!)
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
                     }
                 }
                 .padding(22)
@@ -226,15 +185,31 @@ struct WelcomeView: View {
                 // ⚠️ 这里**不要**加 .keyboardShortcut(.defaultAction)。
                 //    它会把按钮设成窗口默认按钮，任何游荡的 Return 都会把引导页
                 //    直接跳过并写死 hasSeenWelcome —— 实测启动 3 秒内就被误触发了。
-                Button(stepsDone == 3 ? "开始使用" : "先跳过，稍后配置") { onFinish() }
+                Button(state.accountProfile == nil
+                       ? "请先登录"
+                       : (stepsDone == 3 ? "开始使用" : "先跳过权限，稍后完成")) {
+                    onFinish()
+                }
                     .buttonStyle(.borderedProminent)
+                    .disabled(state.accountProfile == nil)
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
         }
         .frame(width: 520, height: 700)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear { keyDraft = state.config.apiKey; keyGlow = true }
+    }
+
+    private func beginTestPress() {
+        guard !pressing else { return }
+        pressing = true
+        state.onTestStart?()
+    }
+
+    private func endTestPress() {
+        guard pressing else { return }
+        pressing = false
+        state.onTestStop?()
     }
 
     private func openPrivacy(_ anchor: String) {
@@ -251,7 +226,7 @@ private struct StepCard<Trailing: View>: View {
     let done: Bool
     let title: String
     let detail: String
-    /// 完成之后是否仍允许修改（Key 这类「填了不等于填对」的步骤要允许）
+    /// 完成之后是否仍允许修改。
     var editable: Bool = false
     @ViewBuilder var trailing: Trailing
 
@@ -280,9 +255,6 @@ private struct StepCard<Trailing: View>: View {
                 Text(detail)
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                // ⚠️ 完成后也要保留输入控件。done 的判据只是「非空」而不是「有效」，
-                //   粘错/被截断的 Key 一样算完成 —— 藏起来用户就再也改不了了，
-                //   而「试一句」此时恰好会出现并报鉴权失败，形成死路。
                 if !done {
                     trailing
                 } else if editable {

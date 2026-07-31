@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - 预设词库
 
-/// 官方维护的预设词库（热词 + 替换规则），数据源是仓库根目录的 `wordlists/*.json`。
+/// 官方维护的预设替换规则，数据源是仓库根目录的 `wordlists/*.json`。
 ///
 /// 三级加载，优先级从高到低：
 ///   1. 本地缓存 `~/.config/viva/data/wordlists/`（上次从 GitHub 拉到的最新版）
@@ -18,7 +18,6 @@ struct Wordlist: Codable, Identifiable {
     var description: String = ""
     var version: Int = 0
     var updatedAt: String = ""
-    var hotwords: [String] = []
     var replaceRules: [ReplaceRule] = []
 }
 
@@ -26,9 +25,8 @@ struct Wordlist: Codable, Identifiable {
 final class WordlistStore: ObservableObject {
     static let shared = WordlistStore()
 
-    /// 词库注册表。**数组顺序 = 合并优先级**（热词窗口约 60 词，先到先得）：
-    /// AI 词 churn 最快、混淆度最高排最前。加库 = 这里登记 + 仓库 wordlists/ 放 JSON。
-    static let knownIds = ["ai", "it", "work"]
+    /// 词库注册表；用户自己的规则始终优先。
+    static let knownIds = Config.supportedWordlistIDs
     /// raw.githubusercontent.com 的 main 分支 —— 改仓库文件即全网生效
     static let remoteBase = "https://raw.githubusercontent.com/d100000/viva/main/wordlists"
 
@@ -134,16 +132,6 @@ final class WordlistStore: ObservableObject {
     }
 
     // MARK: - 合并（用户配置优先）
-
-    /// 用户自己的热词排最前（直传 context 约 100 tokens，先到先得），
-    /// 预设词补在后面，去重，总量交给 ASR 客户端的 prefix(60) 截断。
-    func mergedHotwords(user: [String], enabledLists: [String]) -> [String] {
-        var out = user
-        for list in lists where enabledLists.contains(list.id) {
-            for w in list.hotwords where !out.contains(w) { out.append(w) }
-        }
-        return out
-    }
 
     /// 用户规则优先：同一个 from，用户的 to 覆盖预设的
     func mergedRules(user: [ReplaceRule], enabledLists: [String]) -> [ReplaceRule] {

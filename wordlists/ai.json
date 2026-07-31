@@ -2,18 +2,9 @@
   "schema": 1,
   "id": "ai",
   "name": "AI 工具与模型",
-  "description": "AI 工具、大模型与智能体术语。模型名 churn 以月计，这个库更新最勤 —— App 每天自动同步仓库里的最新版。选词标准：只收语音识别容易识错的专名，纯中文常见词不占热词窗口。",
-  "version": 1,
-  "updatedAt": "2026-07-27",
-  "hotwords": [
-    "Claude Code", "Claude", "ChatGPT", "OpenAI", "Anthropic", "DeepSeek",
-    "Gemini", "Copilot", "Cursor", "Windsurf", "Codex", "Grok",
-    "Kimi", "Qwen", "通义千问", "文心一言", "豆包", "智谱", "GLM",
-    "Manus", "Coze", "Dify", "Ollama", "vLLM", "LangChain", "LlamaIndex",
-    "Hugging Face", "Llama", "Mistral", "Midjourney", "Stable Diffusion",
-    "ComfyUI", "Sora", "MCP", "RAG", "Agent", "Prompt", "Token",
-    "LLM", "Transformer", "Embedding", "vibe coding", "智能体"
-  ],
+  "description": "AI 工具、大模型与智能体术语的本地改词规则。模型名 churn 以月计，这个库更新最勤，App 每天自动同步仓库里的最新版。",
+  "version": 2,
+  "updatedAt": "2026-07-30",
   "replaceRules": [
     { "from": "Cloth Code", "to": "Claude Code" },
     { "from": "克劳德", "to": "Claude" },

@@ -38,9 +38,9 @@ struct StatsView: View {
                     StatTile(icon: "character.cursor.ibeam", tint: .teal, title: "累计字数",
                              value: compactNumber(stats.totalChars),
                              sub: stats.count > 0 ? "平均每次 \(stats.totalChars / max(stats.count,1)) 字" : "—")
-                    StatTile(icon: "creditcard", tint: .pink, title: "预估费用",
-                             value: String(format: "¥%.2f", stats.cost),
-                             sub: "豆包流式 2.0 · 1 元/小时")
+                    StatTile(icon: "bolt.fill", tint: .pink, title: "平均首字",
+                             value: stats.avgFirstCharMs.map { "\($0) ms" } ?? "—",
+                             sub: "客户端到托管服务端到端")
                 }
 
                 HStack(alignment: .top, spacing: 16) {
@@ -84,7 +84,7 @@ struct StatsView: View {
                                            tint: .secondary)
                             }
 
-                            Text("按键盘输入 \(Int(VoiceStats.typingCharsPerMinute)) 字/分钟保守估算。熟练拼音用户通常 40~60 字/分，这里取低值，避免把收益说得太满。")
+                            Text("按键盘输入 \(Int(VoiceStats.typingCharsPerMinute)) 字/分钟估算。个人输入速度不同，节省时间仅供参考。")
                                 .font(.caption2).foregroundStyle(.tertiary)
                                 .fixedSize(horizontal: false, vertical: true)
 

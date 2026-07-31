@@ -136,6 +136,8 @@ struct RecordRow: View {
     let compact: Bool
     @State private var hovering = false
     @State private var copied = false
+    @State private var copiedOriginal = false
+    @State private var showsOriginal = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -146,6 +148,26 @@ struct RecordRow: View {
                     .lineLimit(compact ? 2 : nil)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                if showsOriginal, record.hasDistinctOriginal {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("识别原文")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.tertiary)
+                        Text(record.text)
+                            .font(.system(size: compact ? 12 : 13))
+                            .lineSpacing(2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.leading, 9)
+                    .overlay(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.22))
+                            .frame(width: 2)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
 
                 HStack(spacing: 9) {
                     Text(timeLabel).monospacedDigit()
@@ -161,15 +183,25 @@ struct RecordRow: View {
                         Label("仅复制", systemImage: "doc.on.clipboard")
                             .foregroundStyle(.orange)
                     }
-                    if record.polishedText != nil {
-                        Label("已润色", systemImage: "sparkles").foregroundStyle(.purple)
+                    if record.effectiveAIOutcome != nil {
+                        Label(aiStatusText, systemImage: aiStatusIcon)
+                            .foregroundStyle(aiStatusTint)
+                    }
+                    if record.hasDistinctOriginal, !compact {
+                        Button(showsOriginal ? "收起原文" : "查看原文") {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                showsOriginal.toggle()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
                     }
                 }
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
             }
 
-            if hovering || copied {
+            if hovering || copied || copiedOriginal {
                 HStack(spacing: 4) {
                     Button {
                         TextInjector.copyToClipboard(record.finalText, transient: false)
@@ -180,7 +212,22 @@ struct RecordRow: View {
                             .foregroundStyle(copied ? Color.green : Color.secondary)
                     }
                     .buttonStyle(.borderless)
-                    .help("复制")
+                    .help("复制最终结果")
+
+                    if record.hasDistinctOriginal {
+                        Button {
+                            TextInjector.copyToClipboard(record.text, transient: false)
+                            copiedOriginal = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                                copiedOriginal = false
+                            }
+                        } label: {
+                            Image(systemName: copiedOriginal ? "checkmark" : "doc.text")
+                                .foregroundStyle(copiedOriginal ? Color.green : Color.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("复制识别原文")
+                    }
 
                     Button {
                         HistoryStore.shared.delete(record)
@@ -198,6 +245,38 @@ struct RecordRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .background(hovering ? Color.secondary.opacity(0.06) : .clear)
+    }
+
+    private var aiStatusText: String {
+        let elapsed = record.aiElapsedMs.map { " · \($0)ms" } ?? ""
+        switch record.effectiveAIOutcome {
+        case .changed?:
+            return "已\(record.effectiveAIMode?.resultNoun ?? "AI 处理")\(elapsed)"
+        case .unchanged?:
+            return "AI 检查无改动\(elapsed)"
+        case .fallback?:
+            return "AI 失败，已用原文"
+        case nil:
+            return ""
+        }
+    }
+
+    private var aiStatusIcon: String {
+        switch record.effectiveAIOutcome {
+        case .changed?: return "sparkles"
+        case .unchanged?: return "checkmark.circle"
+        case .fallback?: return "exclamationmark.triangle.fill"
+        case nil: return "sparkles"
+        }
+    }
+
+    private var aiStatusTint: Color {
+        switch record.effectiveAIOutcome {
+        case .changed?: return .purple
+        case .unchanged?: return .secondary
+        case .fallback?: return .orange
+        case nil: return .secondary
+        }
     }
 
     private var timeLabel: String {

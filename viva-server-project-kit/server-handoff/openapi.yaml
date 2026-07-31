@@ -1,0 +1,2843 @@
+openapi: 3.0.3
+info:
+  title: Viva Managed Server API
+  version: 1.0.0
+  description: |
+    Viva macOS 托管语音服务的控制面、用户、计费、润色和管理 API。
+    实时 SAUC WebSocket 的消息定义同时参考 asyncapi.yaml。
+  contact:
+    name: Viva Server Team
+servers:
+  - url: https://api.example.cn
+    description: Production placeholder
+  - url: https://staging-api.example.cn
+    description: Staging placeholder
+tags:
+  - name: System
+  - name: Auth
+  - name: Users
+  - name: Devices
+  - name: Privacy
+  - name: Realtime
+  - name: Polish
+  - name: Usage
+  - name: Billing
+  - name: Diagnostics
+  - name: Admin
+
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      operationId: getLiveness
+      summary: 进程存活检查
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /readyz:
+    get:
+      tags: [System]
+      operationId: getReadiness
+      summary: 是否接受新流量
+      security: []
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /.well-known/jwks.json:
+    get:
+      tags: [System]
+      operationId: getJwks
+      summary: Access Token 验签公钥
+      security: []
+      responses:
+        '200':
+          description: JSON Web Key Set
+          headers:
+            Cache-Control:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JWKSet'
+
+  /v1/service/status:
+    get:
+      tags: [System]
+      operationId: getServiceStatus
+      summary: 服务、维护和上游状态
+      security: []
+      responses:
+        '200':
+          description: Current service status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceStatus'
+
+  /v1/client/config:
+    get:
+      tags: [System]
+      operationId: getClientConfig
+      summary: 获取签名的客户端远程配置和能力
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - $ref: '#/components/parameters/ProtocolVersionHeader'
+        - name: If-None-Match
+          in: header
+          schema: {type: string}
+      responses:
+        '200':
+          description: Effective client configuration
+          headers:
+            ETag:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientConfig'
+        '304':
+          description: Not modified
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/client/bootstrap:
+    post:
+      tags: [Auth]
+      operationId: bootstrapClient
+      summary: 创建或恢复受限 guest 用户和设备
+      description: |
+        不使用 Access Token。请求必须携带包含 public JWK 的 bootstrap DPoP proof，
+        且 Proof JWK 必须和 body 中的 device_key 一致。
+      security:
+        - TokenEndpointDPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - $ref: '#/components/parameters/ProtocolVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BootstrapRequest'
+      responses:
+        '201':
+          description: Guest and device created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BootstrapResponse'
+        '200':
+          description: Existing installation recovered idempotently
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BootstrapResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/auth/otp/request:
+    post:
+      tags: [Auth]
+      operationId: requestEmailOtp
+      summary: 请求邮箱验证码
+      description: 无论邮箱是否存在都返回 202，避免账号枚举。无 Access Token，但必须用设备 P-256 key 提交 Token Endpoint DPoP proof，供设备级防刷。
+      security:
+        - TokenEndpointDPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpRequest'
+      responses:
+        '202':
+          description: Request accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/auth/otp/verify:
+    post:
+      tags: [Auth]
+      operationId: verifyEmailOtp
+      summary: 邮箱 OTP 登录或升级当前 guest
+      description: 可以不带 Access Token 登录；带 guest DPoP Access Token 时将当前 guest 升级为 registered。
+      security:
+        - TokenEndpointDPoPProof: []
+        - DPoPAccessToken: []
+          DPoPProof: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpVerifyRequest'
+      responses:
+        '200':
+          description: Authenticated session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/auth/oidc/exchange:
+    post:
+      tags: [Auth]
+      operationId: exchangeOidcToken
+      summary: Apple/OIDC 登录或绑定
+      security:
+        - TokenEndpointDPoPProof: []
+        - DPoPAccessToken: []
+          DPoPProof: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OidcExchangeRequest'
+      responses:
+        '200':
+          description: Authenticated session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshSession
+      summary: 旋转 Refresh Token 并获取新 Access Token
+      security:
+        - TokenEndpointDPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Rotated token pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokens'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Refresh Token reuse detected; the token family was revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logoutCurrentDevice
+      summary: 撤销当前 Refresh Token family
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204':
+          description: Logged out
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/auth/logout-all:
+    post:
+      tags: [Auth]
+      operationId: logoutAllDevices
+      summary: 撤销全部设备 Token
+      description: Access Token 的 auth_time 必须在 5 分钟内，且 amr 包含 otp、oidc 或 passkey；否则返回 RECENT_AUTH_REQUIRED。
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      responses:
+        '204':
+          description: All token families revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/me:
+    get:
+      tags: [Users]
+      operationId: getCurrentUser
+      summary: 当前用户、账户状态和权益摘要
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      tags: [Users]
+      operationId: updateCurrentUser
+      summary: 更新可编辑资料
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMeRequest'
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/me/consents:
+    put:
+      tags: [Users]
+      operationId: updateConsents
+      summary: 接受用户协议和隐私政策版本
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsentRequest'
+      responses:
+        '200':
+          description: Updated consent state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /v1/devices:
+    get:
+      tags: [Devices]
+      operationId: listDevices
+      summary: 当前用户的设备列表
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+      responses:
+        '200':
+          description: Device list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Device'
+
+  /v1/devices/{device_id}:
+    delete:
+      tags: [Devices]
+      operationId: revokeDevice
+      summary: 撤销设备和其 Refresh Token family
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/DeviceIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '204':
+          description: Device revoked
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/privacy/exports:
+    post:
+      tags: [Privacy]
+      operationId: createPrivacyExport
+      summary: 创建个人数据导出任务
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrivacyExportRequest'
+      responses:
+        '202':
+          description: Export queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivacyRequest'
+
+  /v1/privacy/exports/{request_id}:
+    get:
+      tags: [Privacy]
+      operationId: getPrivacyExport
+      summary: 查询导出状态
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/RequestIdPath'
+      responses:
+        '200':
+          description: Export status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivacyRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/privacy/deletions:
+    post:
+      tags: [Privacy]
+      operationId: createPrivacyDeletion
+      summary: 创建账号注销与数据删除任务
+      description: Access Token 的 auth_time 必须在 5 分钟内，且 amr 包含 otp、oidc 或 passkey；否则返回 RECENT_AUTH_REQUIRED。
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrivacyDeletionRequest'
+      responses:
+        '202':
+          description: Deletion queued with grace period
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivacyRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/privacy/deletions/{request_id}:
+    delete:
+      tags: [Privacy]
+      operationId: cancelPrivacyDeletion
+      summary: 在宽限期内取消注销
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/RequestIdPath'
+      responses:
+        '204':
+          description: Deletion cancelled
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/asr/stream:
+    get:
+      tags: [Realtime]
+      operationId: upgradeAsrStream
+      summary: 升级为 SAUC 透明代理 WebSocket
+      description: 实际服务域名为 voice.api.example.cn；消息契约见 asyncapi.yaml。
+      servers:
+        - url: https://voice.api.example.cn
+          description: Production HTTPS opening-handshake origin; the client connects with wss.
+        - url: https://staging-voice.api.example.cn
+          description: Staging HTTPS opening-handshake origin; the client connects with wss.
+      x-websocket-url: wss://voice.api.example.cn/v1/asr/stream
+      x-dpop-htu: https://voice.api.example.cn/v1/asr/stream
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - $ref: '#/components/parameters/ProtocolVersionHeader'
+        - name: Sec-WebSocket-Protocol
+          in: header
+          required: true
+          description: 首版必须且只能发送唯一值 viva.sauc.v1。
+          schema:
+            type: string
+            enum: [viva.sauc.v1]
+      x-websocket-protocol: viva.sauc.v1
+      x-asyncapi-file: ./asyncapi.yaml
+      responses:
+        '101':
+          description: Switching Protocols
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/text/polish:
+    post:
+      tags: [Polish]
+      operationId: polishText
+      summary: 非流式产品专用文本润色
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolishRequest'
+      responses:
+        '200':
+          description: Polished text
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolishResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /v1/text/polish/stream:
+    post:
+      tags: [Polish]
+      operationId: streamPolishText
+      summary: SSE 产品专用文本润色
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolishRequest'
+      responses:
+        '200':
+          description: "Server-Sent Events stream: meta, delta, final, usage, done or error"
+          headers:
+            Cache-Control:
+              schema: {type: string, example: no-cache}
+            X-Accel-Buffering:
+              schema: {type: string, example: 'no'}
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/usage/summary:
+    get:
+      tags: [Usage]
+      operationId: getUsageSummary
+      summary: 当前账期额度、已用、预留和重置时间
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+      responses:
+        '200':
+          description: Usage summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/usage/sessions:
+    get:
+      tags: [Usage]
+      operationId: listUsageSessions
+      summary: 脱敏的 ASR/LLM 会话元数据
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/CursorQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [asr, llm]
+        - name: from
+          in: query
+          schema: {type: string, format: date-time}
+        - name: to
+          in: query
+          schema: {type: string, format: date-time}
+      responses:
+        '200':
+          description: Session page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSessionPage'
+
+  /v1/billing/plans:
+    get:
+      tags: [Billing]
+      operationId: listBillingPlans
+      summary: 当前可购买套餐
+      security: []
+      parameters:
+        - name: locale
+          in: query
+          schema: {type: string, default: zh-CN}
+      responses:
+        '200':
+          description: Active plan versions
+          headers:
+            ETag:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, price_version]
+                properties:
+                  price_version: {type: string}
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BillingPlan'
+
+  /v1/billing/subscription:
+    get:
+      tags: [Billing]
+      operationId: getSubscription
+      summary: 当前订阅和权益
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+      responses:
+        '200':
+          description: Subscription or free entitlement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+
+  /v1/billing/orders:
+    post:
+      tags: [Billing]
+      operationId: createBillingOrder
+      summary: 创建支付订单
+      description: 仅 registered 用户；金额和 plan version 由服务端计算。
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Order and checkout created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/billing/orders/{order_id}:
+    get:
+      tags: [Billing]
+      operationId: getBillingOrder
+      summary: 查询当前用户订单
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/OrderIdPath'
+      responses:
+        '200':
+          description: Order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingOrder'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/billing/orders/{order_id}/cancel:
+    post:
+      tags: [Billing]
+      operationId: cancelBillingOrder
+      summary: 取消未支付订单
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/OrderIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '200':
+          description: Cancelled order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingOrder'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/billing/subscription/cancel:
+    post:
+      tags: [Billing]
+      operationId: cancelSubscription
+      summary: 期末取消订阅
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '200':
+          description: Updated subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+
+  /v1/billing/subscription/resume:
+    post:
+      tags: [Billing]
+      operationId: resumeSubscription
+      summary: 恢复期末取消
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '200':
+          description: Updated subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+
+  /v1/webhooks/payments/{provider}:
+    post:
+      tags: [Billing]
+      operationId: receivePaymentWebhook
+      summary: 支付 Provider Webhook
+      security:
+        - PaymentSignature: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z0-9_-]{2,32}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '202':
+          description: Verified event persisted for asynchronous processing
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Duplicate event already accepted
+
+  /v1/diagnostics/reports:
+    post:
+      tags: [Diagnostics]
+      operationId: createDiagnosticReport
+      summary: 上传脱敏诊断元数据
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiagnosticReportRequest'
+      responses:
+        '202':
+          description: Report accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /v1/diagnostics/uploads:
+    post:
+      tags: [Diagnostics]
+      operationId: createDiagnosticUpload
+      summary: 获取用户明确同意的短期诊断文件上传凭证
+      security:
+        - DPoPAccessToken: []
+          DPoPProof: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiagnosticUploadRequest'
+      responses:
+        '201':
+          description: Restricted pre-signed upload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosticUploadResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/admin/users:
+    get:
+      tags: [Admin]
+      operationId: adminListUsers
+      summary: 搜索脱敏用户
+      security:
+        - AdminBearerAuth: [support_readonly]
+      parameters:
+        - $ref: '#/components/parameters/CursorQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: query
+          in: query
+          description: User ID、订单号或经过后端 HMAC 查询的邮箱
+          schema: {type: string, maxLength: 255}
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, suspended, deletion_pending, deleted]
+      responses:
+        '200':
+          description: User page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/admin/users/{user_id}:
+    get:
+      tags: [Admin]
+      operationId: adminGetUser
+      summary: 获取脱敏用户详情
+      security:
+        - AdminBearerAuth: [support_readonly]
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+      responses:
+        '200':
+          description: Admin user detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/users/{user_id}/suspend:
+    post:
+      tags: [Admin]
+      operationId: adminSuspendUser
+      summary: 封禁用户
+      security:
+        - AdminBearerAuth: [security_admin]
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '200':
+          description: Suspended user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserDetail'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/users/{user_id}/restore:
+    post:
+      tags: [Admin]
+      operationId: adminRestoreUser
+      summary: 解封用户
+      security:
+        - AdminBearerAuth: [security_admin]
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '200':
+          description: Restored user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserDetail'
+
+  /v1/admin/users/{user_id}/quota-adjustments:
+    post:
+      tags: [Admin]
+      operationId: adminCreateQuotaAdjustment
+      summary: 创建追加或冲正额度
+      security:
+        - AdminBearerAuth: [billing_admin]
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuotaAdjustmentRequest'
+      responses:
+        '201':
+          description: Adjustment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotaAdjustment'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/users/{user_id}/devices/{device_id}/revoke:
+    post:
+      tags: [Admin]
+      operationId: adminRevokeUserDevice
+      summary: 由支持人员撤销指定用户设备
+      security:
+        - AdminBearerAuth: [support_agent]
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - $ref: '#/components/parameters/DeviceIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '204':
+          description: Device and its Refresh Token families revoked
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/users/{user_id}/verification/resend:
+    post:
+      tags: [Admin]
+      operationId: adminResendUserVerification
+      summary: 重新发送待验证身份邮件
+      security:
+        - AdminBearerAuth: [support_agent]
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '202':
+          description: Verification delivery queued without exposing the address
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/users/{user_id}/support-notes:
+    post:
+      tags: [Admin]
+      operationId: adminCreateSupportNote
+      summary: 添加不含正文和 Secret 的支持备注
+      security:
+        - AdminBearerAuth: [support_agent]
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminSupportNoteRequest'
+      responses:
+        '201':
+          description: Support note created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSupportNote'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/asr-sessions:
+    get:
+      tags: [Admin]
+      operationId: adminListAsrSessions
+      summary: 查询 ASR 会话元数据
+      security:
+        - AdminBearerAuth: [support_readonly]
+      parameters:
+        - $ref: '#/components/parameters/CursorQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: user_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: error_code
+          in: query
+          schema: {type: string}
+        - name: upstream_log_id
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: ASR session page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSessionPage'
+
+  /v1/admin/llm-requests:
+    get:
+      tags: [Admin]
+      operationId: adminListLlmRequests
+      summary: 查询 LLM 请求元数据
+      security:
+        - AdminBearerAuth: [support_readonly]
+      parameters:
+        - $ref: '#/components/parameters/CursorQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: user_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: error_code
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: LLM request page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSessionPage'
+
+  /v1/admin/plans:
+    get:
+      tags: [Admin]
+      operationId: adminListPlans
+      summary: 查询全部套餐和版本
+      security:
+        - AdminBearerAuth: [billing_admin]
+      responses:
+        '200':
+          description: Plans
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BillingPlan'
+    post:
+      tags: [Admin]
+      operationId: adminCreatePlanVersion
+      summary: 创建套餐或新套餐版本
+      security:
+        - AdminBearerAuth: [billing_admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminCreatePlanRequest'
+      responses:
+        '201':
+          description: Plan version created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingPlan'
+
+  /v1/admin/plans/{plan_id}:
+    patch:
+      tags: [Admin]
+      operationId: adminUpdatePlanSalesState
+      summary: 修改指定套餐版本的售卖状态；不得改写已发布历史权益
+      security:
+        - AdminBearerAuth: [billing_admin]
+      parameters:
+        - name: plan_id
+          in: path
+          required: true
+          description: BillingPlan.id，对应数据库 plan_versions.id。
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                status:
+                  type: string
+                  enum: [draft, active, retired]
+                sales_end_at:
+                  type: string
+                  format: date-time
+                  nullable: true
+                reason:
+                  type: string
+                  minLength: 3
+                  maxLength: 500
+      responses:
+        '200':
+          description: Updated plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingPlan'
+
+  /v1/admin/client-configs:
+    get:
+      tags: [Admin]
+      operationId: adminListClientConfigs
+      summary: 查询客户端配置版本
+      security:
+        - AdminBearerAuth: [platform_admin]
+      responses:
+        '200':
+          description: Config list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AdminClientConfig'
+    post:
+      tags: [Admin]
+      operationId: adminCreateClientConfig
+      summary: 创建客户端配置草稿
+      security:
+        - AdminBearerAuth: [platform_admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminClientConfigRequest'
+      responses:
+        '201':
+          description: Draft config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminClientConfig'
+
+  /v1/admin/client-configs/{config_id}/publish:
+    post:
+      tags: [Admin]
+      operationId: adminPublishClientConfig
+      summary: 签名并发布客户端配置
+      security:
+        - AdminBearerAuth: [platform_admin]
+      parameters:
+        - name: config_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '200':
+          description: Published config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminClientConfig'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/orders:
+    get:
+      tags: [Admin]
+      operationId: adminListOrders
+      summary: 查询订单、支付和退款状态
+      security:
+        - AdminBearerAuth: [billing_admin]
+      parameters:
+        - $ref: '#/components/parameters/CursorQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: user_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [created, pending_payment, paid, fulfilled, cancelled, expired, refund_pending, partially_refunded, refunded, refund_failed]
+      responses:
+        '200':
+          description: Order page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingOrderPage'
+
+  /v1/admin/orders/{order_id}/refund:
+    post:
+      tags: [Admin]
+      operationId: adminRefundOrder
+      summary: 发起幂等退款
+      security:
+        - AdminBearerAuth: [billing_admin]
+      parameters:
+        - $ref: '#/components/parameters/OrderIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminRefundRequest'
+      responses:
+        '202':
+          description: Refund accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingRefund'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/refunds/{refund_id}:
+    get:
+      tags: [Admin]
+      operationId: adminGetRefund
+      summary: 查询退款及 Provider 对账状态
+      security:
+        - AdminBearerAuth: [billing_admin]
+      parameters:
+        - $ref: '#/components/parameters/RefundIdPath'
+      responses:
+        '200':
+          description: Refund status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingRefund'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/subscriptions:
+    get:
+      tags: [Admin]
+      operationId: adminListSubscriptions
+      summary: 查询订阅
+      security:
+        - AdminBearerAuth: [billing_admin]
+      parameters:
+        - $ref: '#/components/parameters/CursorQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: user_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [trialing, active, past_due, paused, cancelled, expired]
+      responses:
+        '200':
+          description: Subscription page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionPage'
+
+  /v1/admin/subscriptions/{subscription_id}/sync:
+    post:
+      tags: [Admin]
+      operationId: adminSyncSubscription
+      summary: 从支付 Provider 主动拉取并对账订阅
+      security:
+        - AdminBearerAuth: [billing_admin]
+      parameters:
+        - name: subscription_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '202':
+          description: Reconciliation queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+
+  /v1/admin/provider-accounts:
+    get:
+      tags: [Admin]
+      operationId: adminListProviderAccounts
+      summary: 查询 Provider 配置和 Secret reference
+      security:
+        - AdminBearerAuth: [platform_admin]
+      responses:
+        '200':
+          description: Provider accounts without secret material
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProviderAccount'
+    post:
+      tags: [Admin]
+      operationId: adminCreateProviderAccount
+      summary: 登记已有 KMS/Secret Manager reference
+      description: 不接受、也不返回 Provider Secret 明文。
+      security:
+        - AdminBearerAuth: [platform_admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderAccountRequest'
+      responses:
+        '201':
+          description: Provider account registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderAccount'
+
+  /v1/admin/provider-accounts/{provider_id}/test:
+    post:
+      tags: [Admin]
+      operationId: adminTestProviderAccount
+      summary: 使用固定无隐私测试数据冒烟验证 Provider
+      security:
+        - AdminBearerAuth: [platform_admin]
+      parameters:
+        - $ref: '#/components/parameters/ProviderIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '202':
+          description: Provider smoke test queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+
+  /v1/admin/provider-accounts/{provider_id}/rotate:
+    post:
+      tags: [Admin]
+      operationId: adminRotateProviderAccount
+      summary: 切换到新的 Secret reference
+      security:
+        - AdminBearerAuth: [platform_admin]
+      parameters:
+        - $ref: '#/components/parameters/ProviderIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderRotateRequest'
+      responses:
+        '202':
+          description: Rotation and canary validation queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderAccount'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/provider-accounts/{provider_id}/disable:
+    post:
+      tags: [Admin]
+      operationId: adminDisableProviderAccount
+      summary: 禁止新会话使用 Provider account
+      security:
+        - AdminBearerAuth: [platform_admin]
+      parameters:
+        - $ref: '#/components/parameters/ProviderIdPath'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '200':
+          description: Provider disabled for new sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderAccount'
+
+  /v1/admin/live/asr-sessions:
+    get:
+      tags: [Admin]
+      operationId: adminListLiveAsrSessions
+      summary: 查询 Redis 中活跃 ASR 会话
+      security:
+        - AdminBearerAuth: [platform_admin]
+      parameters:
+        - $ref: '#/components/parameters/CursorQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: user_id
+          in: query
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Live session page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveAsrSessionPage'
+
+  /v1/admin/live/asr-sessions/{session_id}/terminate:
+    post:
+      tags: [Admin]
+      operationId: adminTerminateLiveAsrSession
+      summary: 终止指定上下游 WebSocket 会话
+      security:
+        - AdminBearerAuth: [security_admin]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReasonRequest'
+      responses:
+        '202':
+          description: Termination dispatched to owning Gateway instance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/provider-status:
+    get:
+      tags: [Admin]
+      operationId: adminGetProviderStatus
+      summary: Provider 健康、并发、错误和预算
+      security:
+        - AdminBearerAuth: [platform_admin]
+      responses:
+        '200':
+          description: Provider status list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProviderStatus'
+
+  /v1/admin/audit-logs:
+    get:
+      tags: [Admin]
+      operationId: adminListAuditLogs
+      summary: 查询不可变管理审计
+      security:
+        - AdminBearerAuth: [security_admin]
+      parameters:
+        - $ref: '#/components/parameters/CursorQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: actor_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: target_id
+          in: query
+          schema: {type: string}
+        - name: action
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Audit page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogPage'
+
+components:
+  securitySchemes:
+    DPoPAccessToken:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: 'RFC 9449 token-bound authorization header: Authorization: DPoP <short-lived Viva Access Token>.'
+    DPoPProof:
+      type: apiKey
+      in: header
+      name: DPoP
+      description: RFC 9449 proof bound to the Access Token device key.
+    TokenEndpointDPoPProof:
+      type: apiKey
+      in: header
+      name: DPoP
+      description: RFC 9449 proof for token-issuing endpoints. No Authorization header or ath claim is required; the public JWK must identify the device key.
+    AdminBearerAuth:
+      type: oauth2
+      description: >-
+        Enterprise OIDC token with audience viva-admin and MFA. Scope issuance is
+        cumulative by policy: support_agent also carries support_readonly;
+        billing_admin and security_admin also carry support_readonly; the
+        break-glass super_admin token carries all listed scopes.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://admin-idp.example.cn/oauth2/authorize
+          tokenUrl: https://admin-idp.example.cn/oauth2/token
+          scopes:
+            support_readonly: Read redacted support data
+            support_agent: Revoke devices and perform support actions
+            billing_admin: Manage plans, orders and quota adjustments
+            security_admin: Suspend users and read audit logs
+            platform_admin: Manage config and provider operations
+    PaymentSignature:
+      type: apiKey
+      in: header
+      name: X-Payment-Signature
+      description: Placeholder; each provider adapter validates its official signature headers and raw body.
+
+  parameters:
+    DeviceIdHeader:
+      name: X-Viva-Device-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ClientVersionHeader:
+      name: X-Viva-Client-Version
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: '^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$'
+    ProtocolVersionHeader:
+      name: X-Viva-Protocol-Version
+      in: header
+      required: true
+      schema:
+        type: integer
+        enum: [1]
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CursorQuery:
+      name: cursor
+      in: query
+      schema:
+        type: string
+        maxLength: 512
+    LimitQuery:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    DeviceIdPath:
+      name: device_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    RequestIdPath:
+      name: request_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    OrderIdPath:
+      name: order_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    RefundIdPath:
+      name: refund_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    UserIdPath:
+      name: user_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    ProviderIdPath:
+      name: provider_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+
+  responses:
+    BadRequest:
+      description: Invalid request or protocol
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Authentication failed or token expired
+      headers:
+        WWW-Authenticate:
+          schema: {type: string}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authenticated but not permitted
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found within the authenticated subject scope
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: State or idempotency conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RateLimited:
+      description: Rate, quota or concurrency limit reached
+      headers:
+        Retry-After:
+          schema: {type: integer, minimum: 0}
+        RateLimit-Limit:
+          schema: {type: integer, minimum: 0}
+        RateLimit-Remaining:
+          schema: {type: integer, minimum: 0}
+        RateLimit-Reset:
+          schema: {type: integer, minimum: 0}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    BadGateway:
+      description: Upstream provider failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: Maintenance, provider capacity or service overload
+      headers:
+        Retry-After:
+          schema: {type: integer, minimum: 0}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    GatewayTimeout:
+      description: Upstream timeout
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, time]
+      properties:
+        status:
+          type: string
+          enum: [ok, draining, unavailable]
+        time:
+          type: string
+          format: date-time
+        version:
+          type: string
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+
+    ErrorBody:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id, retryable]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: QUOTA_EXHAUSTED
+        message:
+          type: string
+          maxLength: 500
+        request_id:
+          type: string
+          format: uuid
+        retryable:
+          type: boolean
+        retry_after_ms:
+          type: integer
+          minimum: 0
+          nullable: true
+        details:
+          type: object
+          additionalProperties: true
+
+    JWKSet:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    ServiceStatus:
+      type: object
+      additionalProperties: false
+      required: [status, updated_at, components]
+      properties:
+        status:
+          type: string
+          enum: [operational, degraded, maintenance, outage]
+        message:
+          type: string
+          maxLength: 500
+        updated_at:
+          type: string
+          format: date-time
+        retry_after_ms:
+          type: integer
+          minimum: 0
+          nullable: true
+        components:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, status]
+            properties:
+              name: {type: string}
+              status:
+                type: string
+                enum: [operational, degraded, maintenance, outage]
+
+    ClientConfig:
+      type: object
+      additionalProperties: false
+      required: [version, expires_at, minimum_client_version, protocol_version, asr, polish, privacy, signature]
+      properties:
+        version: {type: integer, minimum: 1}
+        expires_at: {type: string, format: date-time}
+        minimum_client_version: {type: string}
+        protocol_version: {type: integer, enum: [1]}
+        asr:
+          type: object
+          additionalProperties: false
+          required: [websocket_url, sample_rate, bits, channels, recommended_chunk_ms, max_session_ms, gateway_absolute_session_ms]
+          properties:
+            websocket_url: {type: string, format: uri}
+            sample_rate: {type: integer, enum: [16000]}
+            bits: {type: integer, enum: [16]}
+            channels: {type: integer, enum: [1]}
+            recommended_chunk_ms: {type: integer, enum: [200]}
+            first_chunk_ms: {type: integer, enum: [100, 200]}
+            max_session_ms: {type: integer, minimum: 1000, maximum: 75000, description: Maximum product-plan session duration.}
+            gateway_absolute_session_ms: {type: integer, enum: [90000], description: Non-entitlement safety ceiling enforced by Gateway.}
+            end_window_min_ms: {type: integer, minimum: 200}
+            end_window_max_ms: {type: integer, maximum: 3000}
+        polish:
+          type: object
+          additionalProperties: false
+          required: [enabled, modes, model_tiers, max_input_chars]
+          properties:
+            enabled: {type: boolean}
+            modes:
+              type: array
+              items: {type: string, enum: [polish, course_correction, both]}
+            model_tiers:
+              type: array
+              items: {type: string}
+            max_input_chars: {type: integer, minimum: 1, maximum: 16000}
+        privacy:
+          type: object
+          additionalProperties: false
+          required: [audio_stored, transcript_stored, metadata_retention_days]
+          properties:
+            audio_stored: {type: boolean, enum: [false]}
+            transcript_stored: {type: boolean, enum: [false]}
+            metadata_retention_days: {type: integer, minimum: 0}
+        feature_flags:
+          type: object
+          additionalProperties: true
+        signature:
+          type: string
+          description: Base64url Ed25519/ES256 signature over canonical configuration.
+
+    BootstrapRequest:
+      type: object
+      additionalProperties: false
+      required: [install_id, device, device_key, locale, timezone]
+      properties:
+        install_id:
+          type: string
+          format: uuid
+        device:
+          type: object
+          additionalProperties: false
+          required: [platform, app_version, protocol_version]
+          properties:
+            name: {type: string, maxLength: 120}
+            platform: {type: string, enum: [macos]}
+            os_version: {type: string, maxLength: 32}
+            app_version: {type: string, maxLength: 32}
+            protocol_version: {type: integer, enum: [1]}
+            architecture: {type: string, enum: [arm64, x86_64]}
+            assurance_level: {type: string, enum: [secure_enclave, keychain]}
+        device_key:
+          $ref: '#/components/schemas/PublicJWK'
+        locale: {type: string, maxLength: 16}
+        timezone: {type: string, maxLength: 64}
+
+    PublicJWK:
+      type: object
+      additionalProperties: false
+      required: [kty, crv, x, y]
+      properties:
+        kty: {type: string, enum: [EC]}
+        crv: {type: string, enum: [P-256]}
+        x: {type: string, minLength: 40, maxLength: 100}
+        y: {type: string, minLength: 40, maxLength: 100}
+
+    BootstrapResponse:
+      type: object
+      additionalProperties: false
+      required: [user, device, tokens, entitlement]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        device:
+          $ref: '#/components/schemas/Device'
+        tokens:
+          $ref: '#/components/schemas/AuthTokens'
+        entitlement:
+          $ref: '#/components/schemas/Entitlement'
+
+    OtpRequest:
+      type: object
+      additionalProperties: false
+      required: [email, purpose, locale]
+      properties:
+        email: {type: string, format: email, maxLength: 254}
+        purpose: {type: string, enum: [login, register, recent_auth]}
+        locale: {type: string, maxLength: 16}
+
+    AcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [request_id, accepted_at]
+      properties:
+        request_id: {type: string, format: uuid}
+        accepted_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+
+    OtpVerifyRequest:
+      type: object
+      additionalProperties: false
+      required: [challenge_id, code, device_key]
+      properties:
+        challenge_id: {type: string, format: uuid}
+        code: {type: string, pattern: '^\d{6}$'}
+        device_key:
+          $ref: '#/components/schemas/PublicJWK'
+
+    OidcExchangeRequest:
+      type: object
+      additionalProperties: false
+      required: [provider, id_token, nonce, device_key]
+      properties:
+        provider: {type: string, enum: [apple]}
+        id_token: {type: string, minLength: 20, maxLength: 16384}
+        authorization_code: {type: string, maxLength: 4096}
+        redirect_uri: {type: string, format: uri}
+        nonce: {type: string, minLength: 16, maxLength: 255}
+        device_key:
+          $ref: '#/components/schemas/PublicJWK'
+
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          pattern: '^vvr_[A-Za-z0-9_-]{32,256}$'
+
+    LogoutRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          pattern: '^vvr_[A-Za-z0-9_-]{32,256}$'
+
+    AuthSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [user, device, tokens, entitlement]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        device:
+          $ref: '#/components/schemas/Device'
+        tokens:
+          $ref: '#/components/schemas/AuthTokens'
+        entitlement:
+          $ref: '#/components/schemas/Entitlement'
+
+    AuthTokens:
+      type: object
+      additionalProperties: false
+      required: [token_type, access_token, access_expires_at, refresh_token, refresh_expires_at]
+      properties:
+        token_type: {type: string, enum: [DPoP]}
+        access_token: {type: string, minLength: 20}
+        access_expires_at: {type: string, format: date-time}
+        refresh_token:
+          type: string
+          pattern: '^vvr_[A-Za-z0-9_-]{32,256}$'
+        refresh_expires_at: {type: string, format: date-time}
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, account_type, status, locale, timezone, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        account_type: {type: string, enum: [guest, registered]}
+        status: {type: string, enum: [active, suspended, deletion_pending, deleted]}
+        display_name: {type: string, maxLength: 80, nullable: true}
+        masked_email: {type: string, nullable: true, example: 'b***@example.com'}
+        locale: {type: string, maxLength: 16}
+        timezone: {type: string, maxLength: 64}
+        terms_version: {type: string, nullable: true}
+        privacy_version: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+
+    Device:
+      type: object
+      additionalProperties: false
+      required: [id, platform, app_version, protocol_version, assurance_level, status, first_seen_at, last_seen_at, current]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string, maxLength: 120, nullable: true}
+        platform: {type: string, enum: [macos]}
+        app_version: {type: string}
+        protocol_version: {type: integer, enum: [1]}
+        os_version: {type: string, nullable: true}
+        architecture: {type: string, nullable: true}
+        assurance_level: {type: string, enum: [secure_enclave, keychain]}
+        status: {type: string, enum: [active, revoked]}
+        first_seen_at: {type: string, format: date-time}
+        last_seen_at: {type: string, format: date-time}
+        revoked_at: {type: string, format: date-time, nullable: true}
+        current: {type: boolean}
+
+    MeResponse:
+      type: object
+      additionalProperties: false
+      required: [user, entitlement, current_device]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        entitlement:
+          $ref: '#/components/schemas/Entitlement'
+        current_device:
+          $ref: '#/components/schemas/Device'
+        subscription:
+          $ref: '#/components/schemas/Subscription'
+
+    UpdateMeRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        display_name: {type: string, maxLength: 80, nullable: true}
+        locale: {type: string, maxLength: 16}
+        timezone: {type: string, maxLength: 64}
+
+    ConsentRequest:
+      type: object
+      additionalProperties: false
+      required: [terms_version, privacy_version, accepted]
+      properties:
+        terms_version: {type: string, maxLength: 32}
+        privacy_version: {type: string, maxLength: 32}
+        accepted: {type: boolean, enum: [true]}
+
+    Entitlement:
+      type: object
+      additionalProperties: false
+      required: [plan_code, plan_version, period_start, period_end, asr_audio_ms_limit, asr_audio_ms_used, asr_audio_ms_reserved, max_asr_concurrency, max_session_ms, polish_enabled, allowed_model_tiers]
+      properties:
+        plan_code: {type: string}
+        plan_version: {type: integer, minimum: 1}
+        period_start: {type: string, format: date-time}
+        period_end: {type: string, format: date-time}
+        asr_audio_ms_limit: {type: integer, format: int64, minimum: 0}
+        asr_audio_ms_used: {type: integer, format: int64, minimum: 0}
+        asr_audio_ms_reserved: {type: integer, format: int64, minimum: 0}
+        max_asr_concurrency: {type: integer, minimum: 1}
+        max_session_ms: {type: integer, minimum: 1000, maximum: 75000, description: Effective product-plan session duration.}
+        polish_enabled: {type: boolean}
+        allowed_model_tiers:
+          type: array
+          items: {type: string}
+        llm_input_tokens_limit: {type: integer, format: int64, minimum: 0}
+        llm_input_tokens_used: {type: integer, format: int64, minimum: 0}
+        llm_output_tokens_limit: {type: integer, format: int64, minimum: 0}
+        llm_output_tokens_used: {type: integer, format: int64, minimum: 0}
+
+    PrivacyExportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        format: {type: string, enum: [zip_json], default: zip_json}
+
+    PrivacyDeletionRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, confirm]
+      properties:
+        reason: {type: string, maxLength: 500}
+        confirm: {type: string, enum: [DELETE_MY_ACCOUNT]}
+
+    PrivacyRequest:
+      type: object
+      additionalProperties: false
+      required: [id, kind, status, requested_at]
+      properties:
+        id: {type: string, format: uuid}
+        kind: {type: string, enum: [export, deletion]}
+        status: {type: string, enum: [requested, processing, ready, completed, cancelled, failed]}
+        requested_at: {type: string, format: date-time}
+        grace_expires_at: {type: string, format: date-time, nullable: true}
+        download_url: {type: string, format: uri, nullable: true}
+        download_expires_at: {type: string, format: date-time, nullable: true}
+        completed_at: {type: string, format: date-time, nullable: true}
+        error_code: {type: string, nullable: true}
+
+    PolishRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, text, mode, model_tier, locale, prompt_version]
+      properties:
+        request_id: {type: string, format: uuid}
+        text:
+          type: string
+          minLength: 1
+          maxLength: 16000
+        mode:
+          type: string
+          enum: [polish, course_correction, both]
+        model_tier:
+          type: string
+          enum: [fast, quality]
+        locale: {type: string, maxLength: 16, default: zh-CN}
+        prompt_version: {type: string, maxLength: 64}
+        app_context:
+          type: object
+          nullable: true
+          additionalProperties: false
+          properties:
+            bundle_id: {type: string, maxLength: 255}
+            category: {type: string, enum: [chat, document, code, email, browser, other]}
+        replacement_hints:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            additionalProperties: false
+            required: [from, to]
+            properties:
+              from: {type: string, minLength: 1, maxLength: 80}
+              to: {type: string, minLength: 1, maxLength: 80}
+
+    PolishResponse:
+      type: object
+      additionalProperties: false
+      required: [id, text, mode, model_tier, prompt_version, elapsed_ms, usage]
+      properties:
+        id: {type: string, format: uuid}
+        text: {type: string}
+        mode: {type: string, enum: [polish, course_correction, both]}
+        model_tier: {type: string}
+        prompt_version: {type: string}
+        elapsed_ms: {type: integer, minimum: 0}
+        usage:
+          $ref: '#/components/schemas/LlmUsage'
+
+    LlmUsage:
+      type: object
+      additionalProperties: false
+      required: [input_tokens, output_tokens, estimated]
+      properties:
+        input_tokens: {type: integer, format: int64, minimum: 0}
+        output_tokens: {type: integer, format: int64, minimum: 0}
+        estimated: {type: boolean}
+
+    UsageSummary:
+      type: object
+      additionalProperties: false
+      required: [period_start, period_end, resources]
+      properties:
+        period_start: {type: string, format: date-time}
+        period_end: {type: string, format: date-time}
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageResource'
+
+    UsageResource:
+      type: object
+      additionalProperties: false
+      required: [resource, unit, limit, used, reserved, remaining]
+      properties:
+        resource: {type: string, example: asr_audio_ms}
+        unit: {type: string, example: ms}
+        limit: {type: integer, format: int64, minimum: 0}
+        used: {type: integer, format: int64, minimum: 0}
+        reserved: {type: integer, format: int64, minimum: 0}
+        remaining: {type: integer, format: int64, minimum: 0}
+
+    UsageSessionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageSession'
+        next_cursor: {type: string, nullable: true}
+
+    UsageSession:
+      type: object
+      additionalProperties: false
+      required: [id, kind, status, started_at]
+      properties:
+        id: {type: string, format: uuid}
+        kind: {type: string, enum: [asr, llm]}
+        status: {type: string}
+        started_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time, nullable: true}
+        duration_ms: {type: integer, format: int64, minimum: 0, nullable: true}
+        audio_ms: {type: integer, format: int64, minimum: 0, nullable: true}
+        input_tokens: {type: integer, format: int64, minimum: 0, nullable: true}
+        output_tokens: {type: integer, format: int64, minimum: 0, nullable: true}
+        client_version: {type: string, nullable: true}
+        first_partial_ms: {type: integer, minimum: 0, nullable: true}
+        upstream_connect_ms: {type: integer, minimum: 0, nullable: true}
+        error_code: {type: string, nullable: true}
+        upstream_log_id: {type: string, nullable: true, description: Only exposed to the owner or authorized support role.}
+
+    BillingPlan:
+      type: object
+      additionalProperties: false
+      required: [id, code, version, display_name, currency, price_minor, billing_interval, entitlement, status]
+      properties:
+        id: {type: string, format: uuid}
+        code: {type: string}
+        version: {type: integer, minimum: 1}
+        display_name: {type: string}
+        description: {type: string, nullable: true}
+        currency: {type: string, minLength: 3, maxLength: 3}
+        price_minor: {type: integer, format: int64, minimum: 0}
+        billing_interval: {type: string, enum: [one_time, month, year]}
+        entitlement:
+          type: object
+          additionalProperties: true
+        status: {type: string, enum: [draft, active, retired]}
+        effective_from: {type: string, format: date-time}
+        sales_end_at: {type: string, format: date-time, nullable: true}
+
+    Subscription:
+      type: object
+      additionalProperties: false
+      required: [id, plan, status, current_period_start, current_period_end, cancel_at_period_end]
+      properties:
+        id: {type: string, format: uuid}
+        plan:
+          $ref: '#/components/schemas/BillingPlan'
+        status: {type: string, enum: [trialing, active, past_due, paused, cancelled, expired]}
+        current_period_start: {type: string, format: date-time}
+        current_period_end: {type: string, format: date-time}
+        cancel_at_period_end: {type: boolean}
+        cancelled_at: {type: string, format: date-time, nullable: true}
+
+    SubscriptionResponse:
+      type: object
+      additionalProperties: false
+      required: [entitlement]
+      properties:
+        subscription:
+          $ref: '#/components/schemas/Subscription'
+        entitlement:
+          $ref: '#/components/schemas/Entitlement'
+
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [plan_code, provider, return_url]
+      properties:
+        plan_code: {type: string, maxLength: 64}
+        provider: {type: string, pattern: '^[a-z0-9_-]{2,32}$'}
+        return_url: {type: string, format: uri}
+
+    BillingOrder:
+      type: object
+      additionalProperties: false
+      required: [id, status, plan, provider, currency, amount_minor, refunded_amount_minor, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        status: {type: string, enum: [created, pending_payment, paid, fulfilled, cancelled, expired, refund_pending, partially_refunded, refunded, refund_failed]}
+        plan:
+          $ref: '#/components/schemas/BillingPlan'
+        provider: {type: string}
+        currency: {type: string, minLength: 3, maxLength: 3}
+        amount_minor: {type: integer, format: int64, minimum: 0}
+        refunded_amount_minor: {type: integer, format: int64, minimum: 0}
+        checkout_url: {type: string, format: uri, nullable: true}
+        qr_code_url: {type: string, format: uri, nullable: true}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, nullable: true}
+        paid_at: {type: string, format: date-time, nullable: true}
+        fulfilled_at: {type: string, format: date-time, nullable: true}
+
+    BillingOrderPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BillingOrder'
+        next_cursor: {type: string, nullable: true}
+
+    AdminRefundRequest:
+      type: object
+      additionalProperties: false
+      required: [amount_minor, reason, ticket_id]
+      properties:
+        amount_minor: {type: integer, format: int64, minimum: 1}
+        reason: {type: string, minLength: 3, maxLength: 1000}
+        ticket_id: {type: string, maxLength: 128}
+
+    BillingRefund:
+      type: object
+      additionalProperties: false
+      required: [id, order_id, status, currency, amount_minor, reason, ticket_id, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        order_id: {type: string, format: uuid}
+        status: {type: string, enum: [requested, pending, succeeded, failed, cancelled]}
+        currency: {type: string, minLength: 3, maxLength: 3}
+        amount_minor: {type: integer, format: int64, minimum: 1}
+        reason: {type: string, maxLength: 1000}
+        ticket_id: {type: string, maxLength: 128}
+        provider_refund_id: {type: string, nullable: true}
+        failure_code: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time, nullable: true}
+
+    SubscriptionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Subscription'
+        next_cursor: {type: string, nullable: true}
+
+    ProviderAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [provider, purpose, region, endpoint, secret_ref, reason, ticket_id]
+      properties:
+        provider: {type: string, enum: [volc_asr, volc_ark, mock_asr, mock_llm]}
+        purpose: {type: string, enum: [asr, llm]}
+        region: {type: string, maxLength: 64}
+        endpoint: {type: string, format: uri}
+        resource_id: {type: string, maxLength: 255, nullable: true}
+        model_alias: {type: string, maxLength: 128, nullable: true}
+        secret_ref: {type: string, minLength: 3, maxLength: 1024}
+        secret_version: {type: string, maxLength: 128, nullable: true}
+        max_concurrency: {type: integer, minimum: 1, nullable: true}
+        reason: {type: string, minLength: 3, maxLength: 1000}
+        ticket_id: {type: string, maxLength: 128}
+
+    ProviderAccount:
+      type: object
+      additionalProperties: false
+      required: [id, provider, purpose, region, endpoint, secret_ref, status, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        provider: {type: string}
+        purpose: {type: string, enum: [asr, llm]}
+        region: {type: string}
+        endpoint: {type: string, format: uri}
+        resource_id: {type: string, nullable: true}
+        model_alias: {type: string, nullable: true}
+        secret_ref: {type: string, description: Reference only; never secret material.}
+        secret_version: {type: string, nullable: true}
+        status: {type: string, enum: [active, disabled, unhealthy]}
+        max_concurrency: {type: integer, minimum: 1, nullable: true}
+        last_health_at: {type: string, format: date-time, nullable: true}
+        last_error_code: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+
+    ProviderRotateRequest:
+      type: object
+      additionalProperties: false
+      required: [new_secret_ref, reason, ticket_id]
+      properties:
+        new_secret_ref: {type: string, minLength: 3, maxLength: 1024}
+        new_secret_version: {type: string, maxLength: 128, nullable: true}
+        canary_percentage: {type: number, format: double, minimum: 0, maximum: 100, default: 5}
+        reason: {type: string, minLength: 3, maxLength: 1000}
+        ticket_id: {type: string, maxLength: 128}
+
+    LiveAsrSessionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LiveAsrSession'
+        next_cursor: {type: string, nullable: true}
+
+    LiveAsrSession:
+      type: object
+      additionalProperties: false
+      required: [session_id, user_id, device_id, instance_id, started_at, lease_expires_at]
+      properties:
+        session_id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        device_id: {type: string, format: uuid}
+        instance_id: {type: string}
+        provider_account_id: {type: string, format: uuid, nullable: true}
+        started_at: {type: string, format: date-time}
+        audio_ms: {type: integer, format: int64, minimum: 0}
+        state: {type: string}
+        lease_expires_at: {type: string, format: date-time}
+
+    DiagnosticReportRequest:
+      type: object
+      additionalProperties: false
+      required: [client_version, os_version, architecture, category, events, consent]
+      properties:
+        client_version: {type: string, maxLength: 32}
+        os_version: {type: string, maxLength: 32}
+        architecture: {type: string, maxLength: 32}
+        category: {type: string, enum: [auth, asr_connect, asr_result, polish, billing, other]}
+        session_id: {type: string, format: uuid, nullable: true}
+        events:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            additionalProperties: false
+            required: [time, code]
+            properties:
+              time: {type: string, format: date-time}
+              code: {type: string, maxLength: 64}
+              duration_ms: {type: integer, minimum: 0}
+              metadata:
+                type: object
+                additionalProperties: true
+                description: Must be redacted and schema-filtered server-side.
+        consent:
+          type: object
+          additionalProperties: false
+          required: [contains_audio, contains_transcript]
+          properties:
+            contains_audio: {type: boolean, enum: [false]}
+            contains_transcript: {type: boolean, enum: [false]}
+
+    DiagnosticUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [file_name, content_type, size_bytes, sha256, explicit_consent]
+      properties:
+        file_name: {type: string, maxLength: 120}
+        content_type: {type: string, enum: [application/zip, audio/wav, audio/x-wav, text/plain]}
+        size_bytes: {type: integer, format: int64, minimum: 1, maximum: 10485760}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        contains_audio: {type: boolean, default: false}
+        contains_transcript: {type: boolean, default: false}
+        explicit_consent: {type: boolean, enum: [true]}
+
+    DiagnosticUploadResponse:
+      type: object
+      additionalProperties: false
+      required: [upload_id, method, upload_url, required_headers, expires_at, object_expires_at]
+      properties:
+        upload_id: {type: string, format: uuid}
+        method: {type: string, enum: [PUT]}
+        upload_url: {type: string, format: uri}
+        required_headers:
+          type: object
+          additionalProperties: {type: string}
+        expires_at: {type: string, format: date-time}
+        object_expires_at: {type: string, format: date-time}
+
+    AdminUserSummary:
+      type: object
+      additionalProperties: false
+      required: [id, account_type, status, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        account_type: {type: string, enum: [guest, registered]}
+        status: {type: string, enum: [active, suspended, deletion_pending, deleted]}
+        masked_email: {type: string, nullable: true}
+        plan_code: {type: string, nullable: true}
+        active_device_count: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+
+    AdminUserPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminUserSummary'
+        next_cursor: {type: string, nullable: true}
+
+    AdminUserDetail:
+      type: object
+      additionalProperties: false
+      required: [user, devices, entitlement, recent_usage]
+      properties:
+        user:
+          $ref: '#/components/schemas/AdminUserSummary'
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/Device'
+        entitlement:
+          $ref: '#/components/schemas/Entitlement'
+        subscription:
+          $ref: '#/components/schemas/Subscription'
+        recent_usage:
+          $ref: '#/components/schemas/UsageSummary'
+        support_notes:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/AdminSupportNote'
+
+    AdminReasonRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, ticket_id]
+      properties:
+        reason: {type: string, minLength: 3, maxLength: 1000}
+        reason_code: {type: string, maxLength: 64}
+        ticket_id: {type: string, minLength: 1, maxLength: 128}
+
+    AdminSupportNoteRequest:
+      type: object
+      additionalProperties: false
+      required: [category, note, ticket_id]
+      properties:
+        category: {type: string, enum: [support, billing, security, other]}
+        note: {type: string, minLength: 3, maxLength: 1000}
+        ticket_id: {type: string, minLength: 1, maxLength: 128}
+
+    AdminSupportNote:
+      type: object
+      additionalProperties: false
+      required: [id, user_id, actor_id, category, note, ticket_id, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        actor_id: {type: string, format: uuid}
+        category: {type: string, enum: [support, billing, security, other]}
+        note: {type: string, maxLength: 1000}
+        ticket_id: {type: string, maxLength: 128}
+        created_at: {type: string, format: date-time}
+
+    QuotaAdjustmentRequest:
+      type: object
+      additionalProperties: false
+      required: [resource, quantity, reason, ticket_id, starts_at]
+      properties:
+        resource: {type: string, maxLength: 64, example: asr_audio_ms}
+        quantity: {type: integer, format: int64, description: Positive grant or negative correction.}
+        reason: {type: string, minLength: 3, maxLength: 1000}
+        reason_code: {type: string, maxLength: 64}
+        ticket_id: {type: string, maxLength: 128}
+        starts_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, nullable: true}
+
+    QuotaAdjustment:
+      type: object
+      additionalProperties: false
+      required: [id, user_id, resource, quantity, starts_at, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        resource: {type: string}
+        quantity: {type: integer, format: int64}
+        starts_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+
+    AdminCreatePlanRequest:
+      type: object
+      additionalProperties: false
+      required: [code, display_name, currency, price_minor, billing_interval, effective_from, entitlement, reason, ticket_id]
+      properties:
+        code: {type: string, pattern: '^[a-z][a-z0-9_-]{1,63}$'}
+        display_name: {type: string, maxLength: 120}
+        currency: {type: string, minLength: 3, maxLength: 3}
+        price_minor: {type: integer, format: int64, minimum: 0}
+        billing_interval: {type: string, enum: [one_time, month, year]}
+        effective_from: {type: string, format: date-time}
+        sales_end_at: {type: string, format: date-time, nullable: true}
+        entitlement:
+          type: object
+          additionalProperties: true
+        reason: {type: string, minLength: 3, maxLength: 1000}
+        ticket_id: {type: string, maxLength: 128}
+
+    AdminClientConfigRequest:
+      type: object
+      additionalProperties: false
+      required: [minimum_client_version, rollout_percentage, audience_rules, config, reason, ticket_id]
+      properties:
+        minimum_client_version: {type: string, maxLength: 32}
+        rollout_percentage: {type: number, format: double, minimum: 0, maximum: 100}
+        audience_rules:
+          type: object
+          additionalProperties: true
+        config:
+          type: object
+          additionalProperties: true
+        reason: {type: string, minLength: 3, maxLength: 1000}
+        ticket_id: {type: string, maxLength: 128}
+
+    AdminClientConfig:
+      type: object
+      additionalProperties: false
+      required: [id, version, status, minimum_client_version, rollout_percentage, audience_rules, config, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        version: {type: integer, minimum: 1}
+        status: {type: string, enum: [draft, published, retired]}
+        minimum_client_version: {type: string}
+        rollout_percentage: {type: number, format: double, minimum: 0, maximum: 100}
+        audience_rules:
+          type: object
+          additionalProperties: true
+        config:
+          type: object
+          additionalProperties: true
+        signature: {type: string, nullable: true}
+        published_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+
+    ProviderStatus:
+      type: object
+      additionalProperties: false
+      required: [id, provider, purpose, region, status, current_concurrency, max_concurrency, concurrency_ratio, daily_cost_microunits, checked_at]
+      properties:
+        id: {type: string, format: uuid}
+        provider: {type: string}
+        purpose: {type: string, enum: [asr, llm]}
+        region: {type: string}
+        status: {type: string, enum: [active, disabled, unhealthy]}
+        current_concurrency: {type: integer, minimum: 0}
+        max_concurrency: {type: integer, minimum: 1}
+        concurrency_ratio: {type: number, format: double, minimum: 0}
+        error_rate_5m: {type: number, format: double, minimum: 0}
+        daily_cost_microunits: {type: integer, format: int64}
+        budget_ratio: {type: number, format: double, minimum: 0}
+        last_error_code: {type: string, nullable: true}
+        checked_at: {type: string, format: date-time}
+
+    AuditLogPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+        next_cursor: {type: string, nullable: true}
+
+    AuditLog:
+      type: object
+      additionalProperties: false
+      required: [id, actor_type, action, result, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        actor_type: {type: string, enum: [user, admin, service, system]}
+        actor_id: {type: string, format: uuid, nullable: true}
+        actor_roles:
+          type: array
+          items: {type: string}
+        action: {type: string}
+        target_type: {type: string, nullable: true}
+        target_id: {type: string, nullable: true}
+        request_id: {type: string, format: uuid, nullable: true}
+        result: {type: string, enum: [success, denied, failed]}
+        reason: {type: string, nullable: true}
+        change_summary:
+          type: object
+          additionalProperties: true
+        created_at: {type: string, format: date-time}

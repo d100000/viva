@@ -4,8 +4,8 @@ import Foundation
 
 /// 一条确定性替换：识别结果里的 `from` 一律改写为 `to`。
 ///
-/// 与热词的分工：热词只能**提高**某个词被识别出来的概率，纠不了顽固错误；
-/// 替换是确定性的 —— 「Cloth Code」永远变「Claude Code」，一次配置终身生效。
+/// 识别服务负责生成候选文本；替换是确定性的 —— 「Cloth Code」永远变「Claude Code」，
+/// 一次配置终身生效。
 /// 这是竞品里「个人改词记忆」的底层机制（豆包输入法有，我们对标）。
 struct ReplaceRule: Codable, Equatable, Hashable, Identifiable {
     var from: String

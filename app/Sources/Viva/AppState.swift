@@ -11,6 +11,11 @@ final class AppState: ObservableObject {
     // ── 配置 ──
     @Published var config: Config = Config.load()
 
+    // ── Viva 账户 ──
+    /// nil 表示当前服务环境没有可恢复的邮箱会话。账户 UI 负责登录/恢复后同步这里，
+    /// 语音、润色与全局热键统一把它作为服务就绪条件。
+    @Published var accountProfile: VivaAccountProfile?
+
     /// 跳进设置页后要滚到的锚点（如 "hotkey"）。设置页消费后自行清空。
     /// 用它而不是纯通知：发起跳转时设置页往往还没挂载，通知会漏；
     /// 存成状态后设置页 onAppear 也能补读到。
@@ -70,10 +75,12 @@ final class AppState: ObservableObject {
         polishTestMs = nil; polishTestLeaked = false
 
         let sample = "嗯那个我们今天下午三点开个会讨论一下豆包流是语音识别的接入方案就是说那个接口的部分"
-        let cfg = config
+        // 连通性测试必须和真实语音会话使用同一份已应用配置。设置页里的
+        // `config` 可能还是尚未保存的草稿，拿它发请求会让测试结果与实际环境错位。
+        let cfg = appliedConfig
         Task { @MainActor in
             do {
-                let r = try await LLMPolisher(config: cfg).polish(sample, contextApp: nil)
+                let r = try await LLMPolisher(config: cfg).polish(sample)
                 polishTestOutput = r.text
                 polishTestMs = r.elapsedMs
                 polishTestLeaked = r.thoughtLeaked
@@ -142,18 +149,20 @@ final class AppState: ObservableObject {
     /// ⚠️ 必须含 hotkeyHealthy。原来不含它，导致「启动后才授予辅助功能」时
     ///   UI 显示「就绪 · 按住右⌘说话」，但 CGEventTap 根本没建，按键毫无反应。
     ///
-    /// ⚠️ 用的是 appliedConfig 而不是 config：设置页的控件直接双向绑定 config，
-    ///   用户敲完 Key 但没点「保存并应用」时 config 已变、而真正干活的
-    ///   VoiceSession 还拿着旧配置。若这里读 config，界面会立刻显示「就绪」，
-    ///   用户按热键却报「还没配置 API Key」—— 状态与行为对不上。
+    /// ⚠️ 用的是 appliedConfig 而不是 config：测试模式和本地 URL 在点击
+    /// 「保存并应用」后才应改变真正工作的 VoiceSession。
     var isReady: Bool {
-        micGranted && axGranted && appliedConfig.hasCredentials
+        accountProfile != nil && micGranted && axGranted
+            && appliedConfig.hasValidBackendConfiguration
             && audioEngineReady && hotkeyHealthy
     }
 
     /// 能不能开始说话。比 isReady 宽松 —— 极简主页里对着 App 自己说话
-    /// 只需要麦克风和 Key，不需要辅助功能（那是写进别的 App 才要的）。
-    var canSpeak: Bool { micGranted && appliedConfig.hasCredentials && audioEngineReady }
+    /// 只需要麦克风和有效服务地址，不需要辅助功能（那是写进别的 App 才要的）。
+    var canSpeak: Bool {
+        accountProfile != nil && micGranted
+            && appliedConfig.hasValidBackendConfiguration && audioEngineReady
+    }
 
     /// 真正生效中的配置（由 AppDelegate 在 reloadConfig 后同步）。
     /// 与 `config`（UI 编辑中的草稿）区分开。
@@ -161,11 +170,8 @@ final class AppState: ObservableObject {
 
     /// UI 上是否有未保存的改动
     var hasUnsavedChanges: Bool {
-        (try? JSONEncoder().encode(config)) != (try? JSONEncoder().encode(appliedConfig))
+        config != appliedConfig
     }
-
-    /// 本次运行的粗略费用（豆包流式 2.0 后付费 1 元/小时）
-    var estimatedCost: Double { billedSeconds / 3600.0 * 1.0 }
 
     /// 「保存并应用」用的：把整份草稿落盘并正式生效。
     /// ⚠️ 必须同步 appliedConfig —— reloadConfig 现在以它为准（不再读草稿），
@@ -183,10 +189,10 @@ final class AppState: ObservableObject {
     /// 「立刻生效」类入口专用：只提交**这一个字段**，不碰设置页里其它未保存的草稿。
     ///
     /// ⚠️ 不要直接用 `saveConfig()` 做这件事。`config` 是设置页的草稿，控件全都双向
-    ///   绑定在它上面；用户可能正把 API Key 清空准备重贴、或者改了服务地址还没决定要不要留。
-    ///   这时候他在说话页随手点一下「AI 润色」胶囊、或者加一个热词、换一个热键，
+    ///   绑定在它上面；用户可能正在切测试模式或修改本地地址，还没决定要不要保存。
+    ///   这时候他在说话页随手点一下「AI 润色」胶囊、或者加一条替换规则、换一个热键，
     ///   `saveConfig()` 会把**整份草稿**落盘并生效 —— 用户以为已经丢弃的改动全部生效，
-    ///   磁盘上的 config.json 也被覆盖（Key 被清空的话界面立刻掉成「未就绪」，原 Key 没了）。
+    ///   磁盘上的 config.json 也会被一并覆盖。
     ///
     /// 正确做法是以 `appliedConfig`（真正生效中的那份）为基线打补丁，
     /// 再把结果同步回草稿，这样草稿里其它未保存的改动原封不动留着。

@@ -7,7 +7,7 @@ enum Page: String, CaseIterable, Identifiable {
     case speak      = "说话"
     case history    = "历史记录"
     case stats      = "数据统计"
-    case dictionary = "词库"
+    case dictionary = "改词记忆"
     case settings   = "设置"
 
     var id: String { rawValue }
@@ -50,6 +50,12 @@ struct SidebarIcon: View {
                     .foregroundStyle(.white)
             }
     }
+}
+
+private enum MainWindowLayoutMetrics {
+    static let sidebarMinimumWidth: CGFloat = 180
+    static let sidebarIdealWidth: CGFloat = 196
+    static let sidebarMaximumWidth: CGFloat = 240
 }
 
 // MARK: - 主界面外壳
@@ -108,7 +114,10 @@ struct MainView: View {
                 .tag(p)
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 196, max: 240)
+            .navigationSplitViewColumnWidth(
+                min: MainWindowLayoutMetrics.sidebarMinimumWidth,
+                ideal: MainWindowLayoutMetrics.sidebarIdealWidth,
+                max: MainWindowLayoutMetrics.sidebarMaximumWidth)
             .safeAreaInset(edge: .bottom) { SidebarFooter(state: state) }
         } detail: {
             Group {
@@ -121,25 +130,19 @@ struct MainView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // ⭐ 左下角常驻入口。侧边栏默认收起之后，「设置」就彻底藏起来了，
-            //   而填 API Key 恰恰是新用户要做的第一件事 —— 必须给一个不用先
-            //   找到侧边栏开关就能点到的入口。没配好时它会变成高亮的行动号召。
+            // ⭐ 左下角常驻入口。侧边栏默认收起之后，「设置」就彻底藏起来了；
+            //   服务或权限未就绪时它会变成高亮的行动号召。
             .overlay(alignment: .bottomLeading) {
-                if page != .settings {
+                if page != .settings, columns == .detailOnly {
                     QuickSettingsButton(state: state) {
                         withAnimation(.easeInOut(duration: 0.2)) { page = .settings }
                     }
                     .padding(20)
                 }
             }
-            // ⭐ 出口。侧边栏默认收起，所以进了任何一个二级页面之后就没有回头路了 ——
-            //   左下角那个入口只负责「进设置」，本身在设置页还会隐藏。
-            //   放在标题栏最左边是 macOS 的惯例位置，同时给 ⌘[（系统级「返回」）。
-            //   ⚠️ 用 HStack 显式写图标+文字，不要用 Label：macOS 工具栏里的 Label
-            //      默认只渲染图标，一个光秃秃的 chevron 认不出是「回主界面」。
+            // 标题栏只由 SwiftUI 管理。NavigationSplitView 负责系统侧栏按钮，
+            // 本层只声明业务按钮，避免再引入第二套 AppKit toolbar。
             .toolbar {
-                // ⭐ 右上角「收起到菜单栏」。语音输入的常态是挂在后台随叫随到，
-                //   主窗口只是配置台 —— 给一个一键退场的口，App 缩进顶部状态栏。
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         NotificationCenter.default.post(name: .vivaCollapseToMenuBar,
@@ -153,6 +156,7 @@ struct MainView: View {
                     }
                     .help("收起到菜单栏 —— 窗口和 Dock 图标都会藏起来，热键照常可用，点顶部状态栏图标随时唤回")
                 }
+
                 if page != .speak {
                     ToolbarItem(placement: .navigation) {
                         Button {
@@ -164,9 +168,6 @@ struct MainView: View {
                                 Text("返回")
                             }
                         }
-                        // ⚠️ 这里**不要**加 .keyboardShortcut("[")：⌘[ 已经挂在主菜单的
-                        //    「视图 → 返回主界面」上（见 AppDelegate.installMainMenu）。
-                        //    同一个快捷键定义两遍没有好处，而主菜单那条路才是可靠的。
                         .help("返回主界面（⌘[）")
                     }
                 }
@@ -289,7 +290,7 @@ private struct QuickSettingsButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help(needsSetup ? "还没配置 API Key，点这里去设置" : "打开设置")
+        .help(needsSetup ? "服务或权限尚未就绪，点这里检查" : "打开设置")
         .animation(.easeInOut(duration: 0.15), value: hovering)
         .animation(.easeInOut(duration: 0.25), value: needsSetup)
     }
@@ -310,7 +311,7 @@ private struct SidebarFooter: View {
                         .font(.system(size: 12, weight: .medium))
                     Text(state.isReady
                          ? "按住 \(HotkeyManager.describe(state.config))"
-                         : "见「总览」页")
+                         : "点「设置」检查")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -407,7 +408,7 @@ struct DashboardView: View {
                                         .onChanged { _ in
                                             guard !pressing,
                                                   state.micGranted,
-                                                  state.config.hasCredentials else { return }
+                                                  state.appliedConfig.hasValidBackendConfiguration else { return }
                                             pressing = true
                                             state.onTestStart?()
                                         }
@@ -417,7 +418,8 @@ struct DashboardView: View {
                                             state.onTestStop?()
                                         }
                                 )
-                                .opacity(state.micGranted && state.config.hasCredentials ? 1 : 0.45)
+                                .opacity(state.micGranted
+                                         && state.appliedConfig.hasValidBackendConfiguration ? 1 : 0.45)
 
                             if state.isPolishing {
                                 HStack(spacing: 5) {
@@ -431,8 +433,7 @@ struct DashboardView: View {
                             if let ms = state.firstCharMs { Metric(label: "首字", value: "\(ms) ms") }
                             if let ms = state.lastSentenceMs { Metric(label: "整段", value: "\(ms) ms") }
                             Metric(label: "本次运行",
-                                   value: String(format: "%.1f 分 · ¥%.3f",
-                                                 state.billedSeconds / 60, state.estimatedCost))
+                                   value: String(format: "%.1f 分", state.billedSeconds / 60))
                             Spacer()
                             Button("清空") {
                                 state.committed = ""; state.partial = ""
@@ -485,10 +486,13 @@ private struct ReadinessCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("还差几步就能用了").font(.headline).padding(.bottom, 6)
 
-                CheckRow(ok: state.config.hasCredentials, title: "API Key",
-                         detail: state.config.hasCredentials
-                            ? "已配置（\(state.config.resourceId)）"
-                            : "去「设置」页填入火山引擎的 API Key",
+                CheckRow(ok: state.appliedConfig.hasValidBackendConfiguration,
+                         title: "Viva 服务地址",
+                         detail: state.appliedConfig.hasValidBackendConfiguration
+                            ? (state.appliedConfig.testModeEnabled
+                               ? "测试模式 · \(state.appliedConfig.selectedBackendBaseURLString)"
+                               : "托管地址已锁定 · 首次请求自动鉴权")
+                            : (state.appliedConfig.backendConfigurationError ?? "服务地址无效"),
                          action: nil)
                 Divider()
                 CheckRow(ok: state.micGranted, title: "麦克风权限",
@@ -624,7 +628,7 @@ struct LevelMeter: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .animation(.linear(duration: 0.06), value: bars)
         }
-        .onChange(of: level) { newValue in
+        .onChange(of: level) { _, newValue in
             bars.removeFirst(); bars.append(newValue)
         }
     }
@@ -666,7 +670,8 @@ final class MainWindowController {
         }
         let w = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable,
+                        .fullSizeContentView],
             backing: .buffered, defer: false)
         w.title = "Viva"
         w.titlebarAppearsTransparent = false

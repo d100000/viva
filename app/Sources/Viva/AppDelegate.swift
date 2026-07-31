@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -10,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var session: VoiceSession!
     private let hud = HUDController()
     private let mainWindow = MainWindowController()
+    private let accountWindow = AccountWindowController()
     private let welcome = WelcomeWindowController()
     private var escMonitor: Any?
     private var hotkeyTestTimeout: Timer?
@@ -18,13 +20,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 锁定期间 onPress/onRelease 都被旁路，单击（onShortTap）= 结束。
     private var dictationLocked = false
     private var lastShortTapAt: Date?
+    private var accountCancellables = Set<AnyCancellable>()
 
     // ── 软件更新 ──
     private let updater = UpdateChecker()
     private var pendingRelease: UpdateChecker.Release?
     private var updateTimer: Timer?
     /// 当前 capture / hotkey 是按哪份配置搭起来的，用来判断要不要真的重建。
-    /// ⚠️ 没有它的话，词库页每加一个热词都会整体重启 AVAudioEngine + 重建 CGEventTap，
+    /// ⚠️ 没有它的话，词库页每修改一项本地替换规则都会整体重启 AVAudioEngine + 重建 CGEventTap，
     ///   而 macOS 上「停掉引擎立刻新建再 start」是出了名的易失败时序
     ///   （inputNode 采样率会短暂返回 0），一失败就把 App 打成「未就绪」并弹红条。
     private var appliedConfig: Config?
@@ -35,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("===== Viva 启动 version=\(version) pid=\(ProcessInfo.processInfo.processIdentifier) =====")
         Log.info("运行路径：\(Bundle.main.bundlePath)；日志：\(Log.fileURL.path)")
         installMainMenu()
+        bindManagedAccountState()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon(.idle)
@@ -78,11 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onCheckUpdate = { [weak self] in self?.checkForUpdate(manual: true) }
         state.onInstallUpdate = { [weak self] in self?.installPendingUpdate() }
         refreshInputDevices()
-        checkPermissionsAndHotkey(forceRetry: true)
-
-        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] ev in
-            if ev.keyCode == 53 { Task { @MainActor in self?.session.abort() } }
-        }
+        syncHotkeyActivation(forceRetry: true)
 
         // 启动 5 秒后查一次更新（错开启动关键路径），此后每 24 小时一次 ——
         // 菜单栏 App 一挂几个星期，只查启动那一次会漏掉所有后续版本
@@ -98,13 +98,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             WordlistStore.shared.refreshIfStale()
         }
 
-        // 全局快捷键 ⌃⌥⌘V：粘贴上一段。开关在触发时才检查 ——
-        // 设置页切换立即生效，不用重注册
+        // 全局快捷键 ⌃⌥⌘V：粘贴上一段。未登录时不向系统注册。
         PasteLastHotkey.shared.onTrigger = { [weak self] in
-            guard let self, self.state.config.pasteLastHotkeyEnabled else { return }
+            guard let self,
+                  self.state.accountProfile != nil,
+                  self.state.config.pasteLastHotkeyEnabled else { return }
             self.pasteLastTranscript()
         }
-        PasteLastHotkey.shared.register()
+        syncHotkeyActivation()
 
         state.onResetHUDPosition = { [weak self] in
             self?.hud.resetPosition()
@@ -118,42 +119,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.collapseToMenuBar() }
         }
 
-        // 首次启动（或还没配好 Key）走欢迎引导；否则直接进主界面。
+        // 首次启动走欢迎引导；第一步是邮箱验证码登录/注册，
+        // 不要求用户填写任何供应商 Key。
         // 无论走哪条，都必须开一个窗口 —— 菜单栏 App 什么都不弹的话，
         // 用户会以为「装了但没打开」。
-        if !state.config.hasSeenWelcome || !state.config.hasCredentials {
+        if !state.config.hasSeenWelcome {
             welcome.onFinish = { [weak self] in
                 guard let self else { return }
+                guard self.state.accountProfile != nil else {
+                    // 红色关闭按钮也会走 onFinish；未登录时不能因此绕过账户门。
+                    self.accountWindow.show()
+                    return
+                }
                 Log.info("欢迎引导完成")
                 self.state.config.hasSeenWelcome = true
                 self.state.saveConfig()
                 // ⚠️ saveConfig() 现在会把整份草稿标记为「已生效」（appliedConfig = config），
                 //   所以必须紧跟一次 reloadConfig 把它真正推给 capture / hotkey / session。
-                //   少了这一句就会出现「isReady 显示就绪、按热键却报还没配 Key」——
+                //   少了这一句就会出现「isReady 显示就绪、会话仍使用旧服务环境」——
                 //   引导期间用户完全可以从菜单栏打开主界面去设置页改东西而不保存。
                 self.state.onReloadConfig?()
-                self.mainWindow.show()
+                self.showWindowForCurrentAccount()
             }
             welcome.show()
         } else {
-            mainWindow.show()
+            showWindowForCurrentAccount()
         }
 
         startUp()
+    }
+
+    /// Keep the product-wide login gate in sync with token refreshes performed
+    /// outside AccountView (ASR and LLM both refresh independently).
+    private func bindManagedAccountState() {
+        let authState = ManagedBackendAuth.shared.state
+
+        // accountProfile 是全产品统一的登录门。只观察 nil / non-nil 变化，
+        // 避免余额刷新时反复拆建系统热键监听。
+        state.$accountProfile
+            .map { $0 != nil }
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                self?.syncHotkeyActivation(forceRetry: true)
+            }
+            .store(in: &accountCancellables)
+
+        authState.$phase
+            .combineLatest(authState.$user, authState.$wallet)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] phase, user, wallet in
+                guard let self else { return }
+                switch phase {
+                case .signedOut:
+                    self.state.accountProfile = nil
+                    if self.state.config.hasSeenWelcome {
+                        self.mainWindow.hide()
+                        self.accountWindow.show()
+                    }
+                case .signedIn:
+                    guard let user, let wallet else { return }
+                    // 余额刷新也会发布 .signedIn；只有首次拿到账号资料时才能切换窗口，
+                    // 否则一次听写结束就会抢走当前输入应用的焦点。
+                    let shouldPresentMainWindow = self.state.accountProfile == nil
+                    self.state.accountProfile = VivaAccountProfile(
+                        email: user.email ?? "",
+                        credits: wallet.availablePoints)
+                    if shouldPresentMainWindow {
+                        self.accountWindow.close()
+                        if self.state.config.hasSeenWelcome {
+                            self.mainWindow.show()
+                        }
+                    }
+                case .failed:
+                    if self.state.accountProfile == nil,
+                       self.state.config.hasSeenWelcome {
+                        self.mainWindow.hide()
+                        self.accountWindow.show()
+                    }
+                case .idle, .restoring:
+                    break
+                }
+            }
+            .store(in: &accountCancellables)
     }
 
     func applicationWillTerminate(_ n: Notification) {
         cancelHotkeyTest(resetMessage: false)
         stopInputTest()
         hotkey?.stop()
+        PasteLastHotkey.shared.unregister()
         capture?.stopEngine()
         HistoryStore.shared.saveNow()
-        if let m = escMonitor { NSEvent.removeMonitor(m) }
+        unregisterEscMonitor()
     }
 
     /// 点 Dock / 重新打开时把主界面唤回来
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        mainWindow.show()
+        showWindowForCurrentAccount()
         return true
     }
 
@@ -161,8 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// macOS 上文本编辑的剪切/拷贝/粘贴/全选是靠主菜单的 key equivalent 分发的，
     /// 不在 NSResponder 的默认链路里。LSUIElement + .accessory 的 App 不会自动获得
-    /// 主菜单，于是用户在欢迎页粘贴 40 多位的 API Key 时会发现 ⌘V 没反应 ——
-    /// 这是整条 onboarding 上最容易让人直接放弃的一步，且现象诡异到不会怀疑是 App 的问题。
+    /// 主菜单，于是设置页里的 URL、替换规则等文本输入会发现 ⌘V 没反应。
     private func installMainMenu() {
         let main = NSMenu()
 
@@ -205,6 +266,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func goHome() {
+        guard state.accountProfile != nil else {
+            accountWindow.show()
+            return
+        }
         mainWindow.show()
         NotificationCenter.default.post(name: .vivaGoHome, object: nil)
     }
@@ -238,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hk = HotkeyManager(config: state.config)
         hk.onPress = { [weak self] in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.state.accountProfile != nil else { return }
                 if self.state.hotkeyTestRunning {
                     self.hotkeyTestPressDetected = true
                     self.state.hotkeyTestMessage = "已检测到按下，请松开完成测试"
@@ -253,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hk.onRelease = { [weak self] in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.state.accountProfile != nil else { return }
                 if self.state.hotkeyTestRunning {
                     guard self.hotkeyTestPressDetected else { return }
                     self.finishHotkeyTest(
@@ -267,7 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hk.onShortTap = { [weak self] in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.state.accountProfile != nil else { return }
                 guard !self.state.hotkeyTestRunning else { return }
 
                 // 锁定中：单击立即结束 —— 不需要等第二击，停止意图越快兑现越好
@@ -283,7 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.lastShortTapAt = nil
                     self.stopInputTest()
                     self.session.begin()
-                    // begin 可能因缺 Key/权限直接失败回 idle —— 只有真开起来才锁
+                    // begin 可能因服务/权限未就绪直接失败回 idle —— 只有真开起来才锁
                     if self.state.isListening {
                         self.dictationLocked = true
                         self.hud.flash(message: "连续听写已开启 —— 再按一下 \(HotkeyManager.describe(self.state.appliedConfig)) 结束",
@@ -297,6 +362,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hk.onHealthChanged = { [weak self] healthy in
             Task { @MainActor in
                 guard let self else { return }
+                guard self.state.accountProfile != nil else {
+                    self.state.hotkeyHealthy = false
+                    self.state.hotkeyStatus = "登录后启用全局热键"
+                    return
+                }
                 self.state.hotkeyHealthy = healthy
                 self.state.hotkeyStatus = healthy
                     ? "全局热键监听正常"
@@ -316,6 +386,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 权限恢复后自动补建 CGEventTap；授权被撤销时拆掉旧监听。
     /// 创建失败也不会永久卡死，AppState 的 2 秒轮询会继续重试。
     private func checkPermissionsAndHotkey(forceRetry: Bool = false) {
+        guard state.accountProfile != nil else {
+            deactivateGlobalHotkeys()
+            return
+        }
+
         let previousAX = state.axGranted
         let previousHealthy = state.hotkeyHealthy
         let previousStatus = state.hotkeyStatus
@@ -361,9 +436,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 语音热键和“粘贴上一段”都属于系统级快捷键，统一跟随登录状态。
+    private func syncHotkeyActivation(forceRetry: Bool = false) {
+        guard hotkey != nil else { return }
+        checkPermissionsAndHotkey(forceRetry: forceRetry)
+        guard state.accountProfile != nil else { return }
+
+        registerEscMonitorIfNeeded()
+        if state.config.pasteLastHotkeyEnabled {
+            PasteLastHotkey.shared.register()
+        } else {
+            PasteLastHotkey.shared.unregister()
+        }
+    }
+
+    private func deactivateGlobalHotkeys() {
+        let inactiveStatus = "登录后启用全局热键"
+        let stateChanged = state.hotkeyHealthy || state.hotkeyStatus != inactiveStatus
+
+        cancelHotkeyTest(resetMessage: false)
+        dictationLocked = false
+        lastShortTapAt = nil
+        if let activeSession = session, activeSession.state != .idle {
+            activeSession.abort()
+        }
+        hotkey?.stop()
+        PasteLastHotkey.shared.unregister()
+        unregisterEscMonitor()
+        state.hotkeyHealthy = false
+        state.hotkeyStatus = inactiveStatus
+
+        if stateChanged {
+            Log.info("账户未登录，已停用全局热键")
+            if statusItem != nil { buildMenu() }
+        }
+    }
+
+    private func registerEscMonitorIfNeeded() {
+        guard escMonitor == nil else { return }
+        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return }
+            Task { @MainActor in self?.session.abort() }
+        }
+    }
+
+    private func unregisterEscMonitor() {
+        guard let monitor = escMonitor else { return }
+        NSEvent.removeMonitor(monitor)
+        escMonitor = nil
+    }
+
     // MARK: - 热键实测
 
     private func startHotkeyTest() {
+        guard state.accountProfile != nil else {
+            state.hotkeyTestResult = false
+            state.hotkeyTestMessage = "请先登录 Viva 后再测试热键"
+            return
+        }
         checkPermissionsAndHotkey()
         guard state.hotkeyHealthy else {
             state.hotkeyTestResult = false
@@ -417,9 +547,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func reloadConfig() {
         // ⚠️ 读 appliedConfig，**不要**读 state.config。
         //   state.config 是设置页的草稿，控件全都双向绑定在它上面。若这里读草稿，
-        //   任何一个「立刻生效」的入口（说话页的 AI 润色胶囊、加热词、换热键）
+        //   任何一个「立刻生效」的入口（说话页的 AI 润色胶囊、加替换规则、换热键）
         //   都会顺带把用户尚未保存、甚至打算丢弃的改动一起推进运行时 ——
-        //   包括那个被清空准备重贴的 API Key。
+        //   包括正在编辑的测试模式和本地服务 URL。
         //   真正生效的那份由 saveConfig()（整份提交）或 commitField()（单字段提交）
         //   在调这里之前写好。
         let new = state.appliedConfig
@@ -463,11 +593,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hotkey.stop()
             hotkey = makeHotkey()
             state.hotkeyHealthy = false
-            checkPermissionsAndHotkey(forceRetry: true)
         }
 
-        // ── 其余配置（热词、识别参数、润色、上屏方式）直接推给现有会话 ──
+        // ── 其余配置（本地替换、润色、上屏方式）直接推给现有会话 ──
         session.update(config: new)
+        if old?.testModeEnabled != new.testModeEnabled
+            || old?.testBackendBaseURL != new.testBackendBaseURL {
+            // Token 按服务 origin 隔离。切换环境后使用独立账户窗口恢复该 origin
+            // 的本机登录会话；主窗口的 NavigationSplitView 不参与登录状态切换。
+            state.accountProfile = nil
+            mainWindow.hide()
+            accountWindow.show()
+        }
+
+        syncHotkeyActivation(forceRetry: hotkeyChanged)
 
         buildMenu()
         Log.info("配置已重新加载（输入设备切换：\(inputDeviceChanged ? "是" : "否")，热键重建：\(hotkeyChanged ? "是" : "否")）")
@@ -580,10 +719,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(open)
 
         // 粘贴上一段：Secure Input / 注入失败 / 手滑清空时的兜底入口
-        let paste = NSMenuItem(title: "粘贴上一段（⌃⌥⌘V）",
+        let paste = NSMenuItem(title: "粘贴上一段结果（⌃⌥⌘V）",
                                action: #selector(pasteLastFromMenu), keyEquivalent: "")
         paste.target = self
         menu.addItem(paste)
+
+        let pasteOriginal = NSMenuItem(title: "粘贴上一段识别原文",
+                                       action: #selector(pasteLastOriginalFromMenu),
+                                       keyEquivalent: "")
+        pasteOriginal.target = self
+        menu.addItem(pasteOriginal)
 
         if let v = state.updateAvailable {
             let up = NSMenuItem(title: "⬆️ 升级到 \(v)…",
@@ -605,7 +750,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
         }
-        mainWindow.show()
+        showWindowForCurrentAccount()
+    }
+
+    private func showWindowForCurrentAccount() {
+        if state.accountProfile != nil {
+            accountWindow.close()
+            mainWindow.show()
+        } else {
+            mainWindow.hide()
+            accountWindow.show()
+        }
     }
 
     /// 收起到菜单栏:窗口藏起、Dock 图标撤下,App 变成纯菜单栏形态。
@@ -621,24 +776,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - 粘贴上一段
 
-    /// 菜单点击要等菜单收起、焦点回到目标 App 再粘，否则可能粘错地方
-    @objc private func pasteLastFromMenu() { pasteLastTranscript(afterDelay: 0.25) }
+    private enum LastTranscriptVersion {
+        case final
+        case original
+    }
 
-    private func pasteLastTranscript(afterDelay delay: Double = 0) {
+    /// 菜单点击要等菜单收起、焦点回到目标 App 再粘，否则可能粘错地方
+    @objc private func pasteLastFromMenu() {
+        pasteLastTranscript(version: .final, afterDelay: 0.25)
+    }
+
+    @objc private func pasteLastOriginalFromMenu() {
+        pasteLastTranscript(version: .original, afterDelay: 0.25)
+    }
+
+    private func pasteLastTranscript(version: LastTranscriptVersion = .final,
+                                     afterDelay delay: Double = 0) {
         guard let r = HistoryStore.shared.records.first else {
             hud.flash(message: "还没有识别记录，先说一句吧", duration: 1.4)
             return
         }
-        // 润色过的用润色版；末尾句号策略跟当初上屏时保持一致
-        let raw = r.polishedText ?? r.text
-        let text = state.config.stripTrailingPeriod
-            ? TextPolish.stripTrailingPeriod(raw) : raw
+        let source = version == .original ? r.text : r.finalText
+        let text = state.appliedConfig.stripTrailingPeriod
+            ? TextPolish.stripTrailingPeriod(source) : source
         guard !text.isEmpty else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            switch TextInjector.commit(text, config: self.state.config) {
+            switch TextInjector.commit(text, config: self.state.appliedConfig) {
             case .injected:
-                self.hud.flash(message: "已粘贴上一段（\(text.count) 字）", duration: 1.2)
+                let noun = version == .original ? "识别原文" : "结果"
+                self.hud.flash(message: "已粘贴上一段\(noun)（\(text.count) 字）", duration: 1.2)
             case .copiedOnly(let reason):
                 self.hud.flash(message: "已复制到剪贴板 —— \(reason)", duration: 2.0)
             }

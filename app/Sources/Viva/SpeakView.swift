@@ -43,17 +43,20 @@ struct SpeakView: View {
                     .onHover { hovering = $0 }
                     .gesture(
                         DragGesture(minimumDistance: 0)
-                            .onChanged { _ in
-                                guard !pressing, state.canSpeak else { return }
-                                pressing = true
-                                edited = ""          // 新一轮，清掉上次的编辑内容
-                                state.onTestStart?()
-                            }
-                            .onEnded { _ in
-                                guard pressing else { return }
-                                pressing = false
-                                state.onTestStop?()
-                            })
+                            .onChanged { _ in beginPress() }
+                            .onEnded { _ in endPress() })
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("按住说话")
+                    .accessibilityValue(pressing ? "正在听写" : "未开始")
+                    .accessibilityHint("VoiceOver 激活一次开始听写，再激活一次结束")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction {
+                        if pressing {
+                            endPress()
+                        } else {
+                            beginPress()
+                        }
+                    }
                     .opacity(state.canSpeak ? 1 : 0.4)
 
                 // ── 提示语 ──
@@ -97,12 +100,12 @@ struct SpeakView: View {
                     state.pendingSettingsAnchor = "hotkey"
                     NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
                 }
-                .padding(.top, 16)
+                .padding(.top, 10)
 
                 // ── 极轻的状态栏 ──
                 FooterStats(store: store, state: state)
-                    .padding(.top, 12)
-                    .padding(.bottom, 22)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -117,12 +120,25 @@ struct SpeakView: View {
     }
 
     private var hint: String {
-        if !state.canSpeak { return "还差一步 —— 在「设置」里填入 API Key" }
+        if !state.canSpeak { return "服务或麦克风尚未就绪 —— 去「设置」检查" }
         if polishing {
-            return state.appliedConfig.enablePolish ? "正在润色…" : "正在修正改口…"
+            return "\(state.appliedConfig.aiProcessingMode.processingLabel)…"
         }
         if listening { return "松开结束" }
         return "按住说话，或按住 \(HotkeyManager.describe(state.config))"
+    }
+
+    private func beginPress() {
+        guard !pressing, state.canSpeak else { return }
+        pressing = true
+        edited = ""
+        state.onTestStart?()
+    }
+
+    private func endPress() {
+        guard pressing else { return }
+        pressing = false
+        state.onTestStop?()
     }
 }
 
@@ -385,16 +401,6 @@ struct TranscriptPane: View {
                                         .foregroundStyle(error.isEmpty
                                                          ? Color.secondary.opacity(0.5) : Color.orange)
                                         .frame(maxWidth: .infinity)
-                                    // 服务未开通的死路必须当场给梯子:主界面是过了引导后
-                                    // 唯一能看到这个错的地方,只有红字没有按钮等于让用户自己去搜
-                                    if error.contains("开通") {
-                                        Button("去火山引擎控制台开通（有免费额度）") {
-                                            NSWorkspace.shared.open(
-                                                URL(string: "https://console.volcengine.com/speech/app")!)
-                                        }
-                                        .buttonStyle(.borderedProminent)
-                                        .controlSize(.small)
-                                    }
                                 }
                             } else {
                                 StreamingText(committed: committed, partial: partial)
@@ -412,8 +418,7 @@ struct TranscriptPane: View {
             // ── 工具条 ──
             Divider().opacity(0.5)
             HStack(spacing: 10) {
-                PolishToggle()
-                CourseCorrectionBadge()
+                AIProcessingModeMenu()
 
                 // 改词记忆：用户刚改完一处错字 —— 这是学规则的最佳时机。
                 // 从 committed→edited 的 diff 里提取「一处简单替换」，点一下永久生效。
@@ -424,11 +429,15 @@ struct TranscriptPane: View {
                 if polishing {
                     HStack(spacing: 5) {
                         ProgressView().controlSize(.small).scaleEffect(0.7)
-                        Text("润色中").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text(AppState.shared.appliedConfig.aiProcessingMode.processingLabel)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
                     }
                 } else if !note.isEmpty {
-                    Label(note, systemImage: "sparkles")
-                        .font(.system(size: 11)).foregroundStyle(.purple)
+                    Label(note, systemImage: note.contains("失败")
+                          ? "exclamationmark.triangle.fill" : "checkmark.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(note.contains("失败") ? Color.orange : Color.secondary)
                         .lineLimit(1)
                 }
 
@@ -520,7 +529,7 @@ private struct RememberFixChip: View {
         }
         .buttonStyle(.plain)
         .disabled(saved)
-        .help("以后识别出「\(rule.from)」都会自动替换成「\(rule.to)」，可在词库页管理")
+        .help("以后识别出「\(rule.from)」都会自动替换成「\(rule.to)」，可在改词记忆页管理")
     }
 }
 
@@ -545,148 +554,60 @@ private struct StreamingText: View {
     }
 }
 
-/// 极简页上的润色开关。直接读写 config 并立刻生效 ——
-/// 这个开关的语义是「下一句要不要润色」，不该还要用户去点保存。
-private struct PolishToggle: View {
+/// 主页上的 AI 模式选择。四个模式仍映射到旧的两个布尔字段，选择后只提交
+/// 这两个字段，不会顺带保存设置页里的其它草稿。
+private struct AIProcessingModeMenu: View {
     @ObservedObject var state = AppState.shared
-    @State private var hovering = false
 
-    @State private var showSetup = false
-
-    /// ⚠️ on 和 ready 必须同源，都读 appliedConfig。
-    ///   这个胶囊要回答的是「下一句真的会被润色吗」，而真正干活的 VoiceSession
-    ///   拿的是 appliedConfig。只把 ready 改过来会渲染出自相矛盾的状态：
-    ///   设置页勾了润色但没保存时，on=true 显示紫色「已开启」，ready=false 同时
-    ///   挂出橙色感叹号说「未配置模型」—— 而模型明明配好了，缺的只是保存。
-    ///   反向更糟：applied 开着、草稿取消勾选未保存时胶囊显示「关闭」，
-    ///   下一句却仍会被送去第三方润色。
-    private var on: Bool { state.appliedConfig.enablePolish }
-    private var ready: Bool { state.appliedConfig.polishReady }
+    private var mode: AIProcessingMode { state.appliedConfig.aiProcessingMode }
+    private var ready: Bool { mode == .off || state.appliedConfig.managedLLMReady }
+    private var tint: Color {
+        switch mode {
+        case .off: return .secondary
+        case .correction: return .teal
+        case .polish: return .purple
+        case .both: return .blue
+        }
+    }
 
     var body: some View {
-        Button {
-            let turningOn = !on
-            // 只提交这一个字段。用 saveConfig() 会把设置页里尚未保存的整份草稿
-            // 一并落盘生效 —— 用户可能正把 API Key 清空准备重贴（见 commitField 注释）。
-            state.commitField { $0.enablePolish = turningOn }
-            state.onReloadConfig?()
-            // 刚打开却还没配模型 —— 这是用户意图最强的一瞬间，
-            // 与其等他说完一句才弹「未配置」的红字，不如当场把路指出来。
-            if turningOn && !ready { showSetup = true }
-            else if !turningOn { showSetup = false }
+        Menu {
+            ForEach(AIProcessingMode.allCases) { candidate in
+                Button {
+                    state.commitField { $0.aiProcessingMode = candidate }
+                    state.onReloadConfig?()
+                } label: {
+                    if candidate == mode {
+                        Label(candidate.title, systemImage: "checkmark")
+                    } else {
+                        Text(candidate.title)
+                    }
+                }
+            }
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "sparkles")
                     .font(.system(size: 10.5, weight: .semibold))
-                Text("AI 润色").font(.system(size: 11, weight: .medium))
-                if on && !ready {
+                Text(mode.compactTitle)
+                    .font(.system(size: 11, weight: .medium))
+                if !ready {
                     Image(systemName: "exclamationmark.circle.fill")
                         .font(.system(size: 9)).foregroundStyle(.orange)
                 }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7.5, weight: .semibold))
             }
-            .foregroundStyle(on ? Color.white : Color.secondary)
+            .foregroundStyle(tint)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background {
-                Capsule().fill(on
-                    ? AnyShapeStyle(LinearGradient(colors: [.purple, .pink],
-                                                   startPoint: .leading, endPoint: .trailing))
-                    : AnyShapeStyle(Color.primary.opacity(hovering ? 0.09 : 0.05)))
-            }
+            .background(Capsule().fill(tint.opacity(mode == .off ? 0.06 : 0.12)))
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(on
-              ? (ready ? "已开启：松手后先润色再显示" : "已开启但未配置模型，点一下看怎么配")
-              : "关闭状态：直接显示原始识别结果")
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: on)
-        .popover(isPresented: $showSetup, arrowEdge: .top) {
-            PolishSetupPopover { showSetup = false }
-        }
-    }
-}
-
-/// 改口纠正生效中的小标识。必须挂出来 —— 润色胶囊显示「关闭」而文字仍被
-/// 大模型改过,用户会觉得 App 在说谎（同 PolishToggle 的同源原则）。
-private struct CourseCorrectionBadge: View {
-    @ObservedObject var state = AppState.shared
-
-    private var active: Bool {
-        state.appliedConfig.enableCourseCorrection && state.appliedConfig.llmCredentialsReady
-    }
-
-    var body: some View {
-        if active {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: 9.5, weight: .semibold))
-                Text("改口纠正").font(.system(size: 11, weight: .medium))
-            }
-            .foregroundStyle(.teal)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Capsule().fill(Color.teal.opacity(0.12)))
-            .help("说错了直接重说,上屏只保留你最终想说的。可在设置 → 大模型润色里关闭")
-        }
-    }
-}
-
-/// 开了润色但没配模型时弹的引导。
-///
-/// 这里是整个产品转化意图最强的一个点：用户刚刚亲手表达了「我想要 AI 润色」，
-/// 而挡在他和这个功能之间的是「去某家云厂商注册 → 实名 → 充值 → 开通模型 →
-/// 建 Key → 抄模型名」这一长串。把最短的那条路直接摆出来。
-private struct PolishSetupPopover: View {
-    let onDone: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles").foregroundStyle(.tint)
-                Text("还差一个模型").font(.system(size: 13, weight: .semibold))
-            }
-            Text("推荐国产 **DeepSeek V4 Flash** —— 快、便宜（一句话不到一厘钱），注册简单不用海外支付。点下面一键配好服务商和模型，去拿个 API Key 填进设置即可。想要国内外模型共用一个 Key，也可以用 **Viva 中转站**。")
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(width: 310, alignment: .leading)
-
-            HStack(spacing: 8) {
-                Button("一键按 DeepSeek 配置") {
-                    // 地址/协议/端点/模型一次配平,只留 Key 要填 —— 字段错任何一个都是 404
-                    AppState.shared.commitField {
-                        $0.polishProvider = "deepseek"
-                        $0.polishBaseURL = "https://api.deepseek.com"
-                        $0.polishAPIFormat = "openai-chat"
-                        $0.polishPath = "/chat/completions"
-                        $0.polishModel = "deepseek-v4-flash"
-                    }
-                    AppState.shared.onReloadConfig?()
-                    if let u = URL(string: "https://platform.deepseek.com/api_keys") {
-                        NSWorkspace.shared.open(u)
-                    }
-                    NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
-                    onDone()
-                }
-                .buttonStyle(.borderedProminent).controlSize(.small)
-
-                Button("用 Viva 中转站") {
-                    if let u = URL(string: LLMProvider.relaySite) {
-                        NSWorkspace.shared.open(u)
-                    }
-                    NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
-                    onDone()
-                }
-                .controlSize(.small)
-
-                Button("已有 Key") {
-                    NotificationCenter.default.post(name: .vivaOpenSettings, object: nil)
-                    onDone()
-                }
-                .controlSize(.small)
-                Spacer()
-            }
-        }
-        .padding(13)
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(ready ? mode.detail : "AI 处理已开启，但当前服务地址无效")
+        .accessibilityLabel("AI 处理模式：\(mode.title)")
+        .animation(.easeInOut(duration: 0.18), value: mode)
     }
 }
 
@@ -779,15 +700,23 @@ private struct FooterStats: View {
 
     var body: some View {
         let today = store.today
-        HStack(spacing: 18) {
-            stat("今天", "\(today.count) 次")
-            dot
-            stat("字数", "\(today.totalChars)")
-            dot
-            stat("时长", formatDuration(today.totalSeconds))
-            if let ms = state.firstCharMs {
+        VStack(spacing: 6) {
+            HStack(spacing: 18) {
+                stat("今天", "\(today.count) 次")
                 dot
-                stat("首字", "\(ms) ms")
+                stat("字数", "\(today.totalChars)")
+                dot
+                stat("时长", formatDuration(today.totalSeconds))
+                if let ms = state.firstCharMs {
+                    dot
+                    stat("首字", "\(ms) ms")
+                }
+            }
+
+            if state.appliedConfig.testModeEnabled {
+                VivaServiceRoutingView(config: state.appliedConfig,
+                                       alignment: .center,
+                                       compact: true)
             }
         }
         .font(.system(size: 11))

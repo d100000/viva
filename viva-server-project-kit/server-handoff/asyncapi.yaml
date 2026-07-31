@@ -1,0 +1,352 @@
+asyncapi: 3.0.0
+info:
+  title: Viva SAUC Realtime Gateway
+  version: 1.0.0
+  description: |
+    Viva 客户端与自有 ASR Gateway 之间的 WebSocket 契约。
+    Binary message 保持火山 SAUC message 边界；Text message 是 Viva Gateway 控制事件。
+    一条客户端 WebSocket 严格对应一条火山 bigmodel_async WebSocket。
+
+defaultContentType: application/json
+
+servers:
+  production:
+    host: voice.api.example.cn
+    protocol: wss
+    description: Production placeholder
+    security:
+      - $ref: '#/components/securitySchemes/dpopAccessToken'
+      - $ref: '#/components/securitySchemes/dpopProof'
+  staging:
+    host: staging-voice.api.example.cn
+    protocol: wss
+    description: Staging placeholder
+    security:
+      - $ref: '#/components/securitySchemes/dpopAccessToken'
+      - $ref: '#/components/securitySchemes/dpopProof'
+
+channels:
+  asrStream:
+    address: /v1/asr/stream
+    title: SAUC transparent relay
+    description: |
+      客户端发送 binary SAUC full/audio/last messages；服务端返回火山 binary SAUC responses，
+      并可穿插发送 JSON text 控制事件。客户端必须依据 WebSocket message type 分流。
+    bindings:
+      ws:
+        method: GET
+        headers:
+          $ref: '#/components/schemas/WebSocketHandshakeHeaders'
+        bindingVersion: 0.1.0
+    messages:
+      clientSaucBinary:
+        $ref: '#/components/messages/ClientSaucBinary'
+      providerSaucBinary:
+        $ref: '#/components/messages/ProviderSaucBinary'
+      gatewaySessionAccepted:
+        $ref: '#/components/messages/GatewaySessionAccepted'
+      gatewayUpstreamReady:
+        $ref: '#/components/messages/GatewayUpstreamReady'
+      gatewayQuotaWarning:
+        $ref: '#/components/messages/GatewayQuotaWarning'
+      gatewaySessionCompleted:
+        $ref: '#/components/messages/GatewaySessionCompleted'
+      gatewayError:
+        $ref: '#/components/messages/GatewayError'
+      gatewayMaintenance:
+        $ref: '#/components/messages/GatewayMaintenance'
+
+operations:
+  clientSendSauc:
+    action: send
+    channel:
+      $ref: '#/channels/asrStream'
+    summary: Client sends full request, audio messages and one last message.
+    messages:
+      - $ref: '#/channels/asrStream/messages/clientSaucBinary'
+  clientReceiveProviderSauc:
+    action: receive
+    channel:
+      $ref: '#/channels/asrStream'
+    summary: Client receives unchanged provider SAUC binary responses.
+    messages:
+      - $ref: '#/channels/asrStream/messages/providerSaucBinary'
+  clientReceiveGatewayEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/asrStream'
+    summary: Client receives Viva Gateway JSON text control events.
+    messages:
+      - $ref: '#/channels/asrStream/messages/gatewaySessionAccepted'
+      - $ref: '#/channels/asrStream/messages/gatewayUpstreamReady'
+      - $ref: '#/channels/asrStream/messages/gatewayQuotaWarning'
+      - $ref: '#/channels/asrStream/messages/gatewaySessionCompleted'
+      - $ref: '#/channels/asrStream/messages/gatewayError'
+      - $ref: '#/channels/asrStream/messages/gatewayMaintenance'
+
+components:
+  securitySchemes:
+    dpopAccessToken:
+      type: httpApiKey
+      name: Authorization
+      in: header
+      description: 'Authorization: DPoP <short-lived Viva Access Token>'
+    dpopProof:
+      type: httpApiKey
+      name: DPoP
+      in: header
+      description: RFC 9449 proof bound to the device key and Access Token; htu uses the HTTPS opening-handshake URI, not the wss URI.
+
+  messages:
+    ClientSaucBinary:
+      name: ClientSaucBinary
+      title: Client SAUC binary message
+      contentType: application/octet-stream
+      summary: One complete SAUC message per WebSocket binary message.
+      payload:
+        type: string
+        format: binary
+      x-viva-message-order:
+        - exactly one fullClientRequest
+        - zero or more audioOnlyRequest
+        - exactly one audioOnlyRequest with last flag
+      x-viva-validation:
+        maxWebSocketMessageBytes: 131072
+        maxInflatedFullRequestBytes: 65536
+        audio:
+          sampleRate: 16000
+          bits: 16
+          channels: 1
+          format: pcm
+          codec: raw
+        modelName: bigmodel
+        showUtterances: true
+        resultType: full
+        expectedChunkMs: 200
+      examples:
+        - name: opaqueSaucBytes
+          summary: Bytes are captured in protocol golden fixtures, not embedded as Base64 JSON.
+
+    ProviderSaucBinary:
+      name: ProviderSaucBinary
+      title: Unchanged provider SAUC binary response
+      contentType: application/octet-stream
+      summary: Gateway forwards each provider WebSocket binary message unchanged.
+      payload:
+        type: string
+        format: binary
+      x-viva-must-preserve:
+        - websocket-message-boundary
+        - sequence
+        - flags
+        - serialization
+        - compression
+        - payload
+        - close-order
+
+    GatewaySessionAccepted:
+      name: GatewaySessionAccepted
+      title: Gateway accepted the authenticated session
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/GatewaySessionAcceptedPayload'
+      examples:
+        - payload:
+            type: gateway.session.accepted
+            session_id: 019b1b7d-3f03-7d13-a26b-0ce90c24b714
+            trace_id: 4bf92f3577b34da6a3ce929d0e0e4736
+            protocol_version: 1
+            limits:
+              max_session_ms: 75000
+              gateway_absolute_session_ms: 90000
+              max_audio_bytes: 2400000
+              max_binary_message_bytes: 131072
+
+    GatewayUpstreamReady:
+      name: GatewayUpstreamReady
+      title: Volcengine upstream WebSocket is ready
+      contentType: application/json
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/GatewayEventBase'
+          - type: object
+            required: [upstream_log_id, connect_ms]
+            properties:
+              type:
+                type: string
+                const: gateway.upstream.ready
+              upstream_log_id: {type: string, maxLength: 255}
+              connect_ms: {type: integer, minimum: 0}
+
+    GatewayQuotaWarning:
+      name: GatewayQuotaWarning
+      title: Session is close to its reserved quota
+      contentType: application/json
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/GatewayEventBase'
+          - type: object
+            required: [remaining_audio_ms]
+            properties:
+              type:
+                type: string
+                const: gateway.quota.warning
+              remaining_audio_ms: {type: integer, minimum: 0}
+
+    GatewaySessionCompleted:
+      name: GatewaySessionCompleted
+      title: Gateway completed metering and relay
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/GatewaySessionCompletedPayload'
+
+    GatewayError:
+      name: GatewayError
+      title: Stable gateway error before close
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/GatewayErrorPayload'
+
+    GatewayMaintenance:
+      name: GatewayMaintenance
+      title: Deployment drain or maintenance notice
+      contentType: application/json
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/GatewayEventBase'
+          - type: object
+            required: [retry_after_ms]
+            properties:
+              type:
+                type: string
+                const: gateway.maintenance
+              retry_after_ms: {type: integer, minimum: 0}
+
+  schemas:
+    WebSocketHandshakeHeaders:
+      type: object
+      description: >-
+        Projection of Viva application headers after the HTTP/WebSocket stack
+        has validated Host, Upgrade, Connection, Sec-WebSocket-Key and
+        Sec-WebSocket-Version. It is not the complete wire header map.
+      required:
+        - Authorization
+        - DPoP
+        - X-Viva-Device-ID
+        - X-Viva-Client-Version
+        - X-Viva-Protocol-Version
+        - Sec-WebSocket-Protocol
+      properties:
+        Authorization:
+          type: string
+          pattern: '^DPoP .+$'
+        DPoP:
+          type: string
+          minLength: 20
+        X-Viva-Device-ID:
+          type: string
+          format: uuid
+        X-Viva-Client-Version:
+          type: string
+        X-Viva-Protocol-Version:
+          type: integer
+          const: 1
+        X-Request-ID:
+          type: string
+          format: uuid
+        Sec-WebSocket-Protocol:
+          type: string
+          description: The first protocol version accepts exactly this single value.
+          const: viva.sauc.v1
+
+    GatewayEventBase:
+      type: object
+      description: Extensible gateway event envelope; clients must ignore unknown top-level response fields.
+      required: [type, session_id, trace_id]
+      properties:
+        type: {type: string}
+        session_id: {type: string, format: uuid}
+        trace_id: {type: string, minLength: 16, maxLength: 64}
+
+    GatewaySessionAcceptedPayload:
+      allOf:
+        - $ref: '#/components/schemas/GatewayEventBase'
+        - type: object
+          required: [protocol_version, limits]
+          properties:
+            type:
+              type: string
+              const: gateway.session.accepted
+            protocol_version:
+              type: integer
+              const: 1
+            limits:
+              type: object
+              additionalProperties: false
+              required: [max_session_ms, gateway_absolute_session_ms, max_audio_bytes, max_binary_message_bytes]
+              properties:
+                max_session_ms: {type: integer, minimum: 1000, maximum: 75000}
+                gateway_absolute_session_ms: {type: integer, const: 90000}
+                max_audio_bytes: {type: integer, minimum: 32000}
+                max_binary_message_bytes: {type: integer, minimum: 1024, maximum: 131072}
+
+    GatewaySessionCompletedPayload:
+      allOf:
+        - $ref: '#/components/schemas/GatewayEventBase'
+        - type: object
+          required: [usage, timing]
+          properties:
+            type:
+              type: string
+              const: gateway.session.completed
+            usage:
+              type: object
+              additionalProperties: false
+              required: [audio_ms, audio_bytes]
+              properties:
+                audio_ms: {type: integer, minimum: 0}
+                audio_bytes: {type: integer, minimum: 0}
+            timing:
+              type: object
+              additionalProperties: false
+              properties:
+                upstream_connect_ms: {type: integer, minimum: 0}
+                first_partial_ms: {type: integer, minimum: 0}
+                last_audio_to_final_ms: {type: integer, minimum: 0}
+
+    GatewayErrorPayload:
+      allOf:
+        - $ref: '#/components/schemas/GatewayEventBase'
+        - type: object
+          required: [code, message, retryable]
+          properties:
+            type:
+              type: string
+              const: gateway.error
+            code:
+              type: string
+              pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+            message:
+              type: string
+              maxLength: 500
+            retryable: {type: boolean}
+            retry_after_ms: {type: integer, minimum: 0, nullable: true}
+            provider_code: {type: string, nullable: true}
+
+x-viva-close-codes:
+  '1000': Normal completion or user cancellation
+  '1001': Graceful shutdown
+  '1002': WebSocket or SAUC protocol error
+  '1008': Auth, quota or entitlement rejection
+  '1009': Message too large
+  '1011': Internal or unrecoverable provider failure
+  '1012': Service restart after drain timeout
+  '1013': Temporary overload
+
+x-viva-timeouts-ms:
+  auth: 1000
+  firstBinary: 2000
+  upstreamConnect: 3000
+  interFrameIdle: 10000
+  finalResult: 8000
+  absoluteSession: 90000

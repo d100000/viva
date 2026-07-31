@@ -2,20 +2,9 @@
   "schema": 1,
   "id": "it",
   "name": "编程 / 基础设施",
-  "description": "编程语言、框架、数据库与基础设施的常用专名。AI 相关词已拆到「AI 工具与模型」库单独维护。选词标准：只收语音识别容易识错的英文专名与中英混合词。",
-  "version": 2,
-  "updatedAt": "2026-07-27",
-  "hotwords": [
-    "GitHub", "GitLab", "Git", "Docker", "Kubernetes", "Nginx", "Redis",
-    "MySQL", "PostgreSQL", "MongoDB", "SQLite", "Elasticsearch", "Kafka",
-    "Linux", "Ubuntu", "Debian", "macOS", "iOS", "Android",
-    "VS Code", "Xcode", "Vim", "Homebrew", "Terminal", "Shell", "Bash", "Zsh",
-    "Python", "JavaScript", "TypeScript", "Swift", "Kotlin", "Rust",
-    "Golang", "Node.js", "React", "Vue", "Next.js", "Flutter",
-    "Electron", "WebSocket", "GraphQL", "gRPC", "OAuth", "JWT",
-    "JSON", "YAML", "CI/CD", "DevOps", "Serverless",
-    "灰度发布", "压测", "联调", "鉴权", "埋点", "上屏", "热词"
-  ],
+  "description": "编程语言、框架、数据库与基础设施的本地改词规则。AI 相关词已拆到「AI 工具与模型」库单独维护。",
+  "version": 3,
+  "updatedAt": "2026-07-30",
   "replaceRules": [
     { "from": "派森", "to": "Python" },
     { "from": "吉特哈布", "to": "GitHub" },

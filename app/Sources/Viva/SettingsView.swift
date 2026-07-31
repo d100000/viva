@@ -124,27 +124,19 @@ struct HotkeyRecorderField: View {
 
 struct DictionaryView: View {
     @ObservedObject var state: AppState
-    @State private var newWord = ""
-    @State private var bulkMode = false
-    @State private var bulkText = ""
-    @State private var justSaved = false
-    @FocusState private var inputFocused: Bool
-
-    private var words: [String] { state.config.hotwords }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-
-                // ── 说明卡 ──
                 GroupBox {
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(spacing: 7) {
-                            Image(systemName: "sparkles").foregroundStyle(.orange)
-                            Text("热词是专有名词识别率的最大杠杆")
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .foregroundStyle(.orange)
+                            Text("识别后在本机自动纠错")
                                 .font(.system(size: 13, weight: .medium))
                         }
-                        Text("把最容易被识错的人名、产品名、技术术语加进来，直接传给豆包的 corpus.context。实测「Claude」不加热词会被识别成「Cloth」，「上屏」会变成「尚平」。")
+                        Text("替换规则只在识别结果返回后由 Viva 客户端应用，不会改变服务端语音识别参数，也不会把自定义词表发送给供应商。")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -152,168 +144,33 @@ struct DictionaryView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                // ── 添加 ──
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 8) {
-                            TextField(bulkMode ? "批量编辑中，请在下方文本框修改" : "输入一个热词，回车添加",
-                                      text: $newWord)
-                                .textFieldStyle(.roundedBorder)
-                                .focused($inputFocused)
-                                .onSubmit(addWord)
-                                // 批量编辑用的是进入时的快照，退出时整体覆盖。
-                                // 若此时还能从这里加词，退出批量编辑会把刚加的词吞掉。
-                                .disabled(bulkMode)
-                            Button("添加", action: addWord)
-                                .disabled(bulkMode || newWord.trimmingCharacters(in: .whitespaces).isEmpty)
-                            Button(bulkMode ? "退出批量编辑" : "批量编辑") {
-                                if bulkMode {
-                                    applyBulk()
-                                } else {
-                                    bulkText = words.joined(separator: "\n")
-                                }
-                                bulkMode.toggle()
-                            }
-                        }
-
-                        if bulkMode {
-                            VStack(alignment: .leading, spacing: 6) {
-                                TextEditor(text: $bulkText)
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .scrollContentBackground(.hidden)
-                                    .padding(6)
-                                    .frame(height: 180)
-                                    .background(Color(nsColor: .textBackgroundColor),
-                                                in: RoundedRectangle(cornerRadius: 7))
-                                    .overlay(RoundedRectangle(cornerRadius: 7)
-                                        .strokeBorder(Color.secondary.opacity(0.28)))
-                                Text("一行一个词。点「退出批量编辑」保存。")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-
-                        if !bulkMode {
-                            if words.isEmpty {
-                                VStack(spacing: 8) {
-                                    Image(systemName: "character.book.closed")
-                                        .font(.system(size: 26)).foregroundStyle(.tertiary)
-                                    Text("还没有热词").foregroundStyle(.secondary).font(.callout)
-                                    Button("填入一组示例") { loadSamples() }
-                                        .buttonStyle(.link)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 26)
-                            } else {
-                                WordChips(words: words, onDelete: removeWord)
-                            }
-                        }
-                    }
-                    .padding(6)
-                }
-
-                // ── 预设词库 ──
-                PresetWordlistSection(state: state)
-
-                // ── 替换词表 ──
                 ReplaceRuleSection(state: state)
-
-                // ── 状态与警告 ──
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("\(words.count) 个热词")
-                            .font(.caption).foregroundStyle(.secondary)
-                        if justSaved {
-                            Label("已生效", systemImage: "checkmark.circle.fill")
-                                .font(.caption).foregroundStyle(.green)
-                        }
-                        Spacer()
-                        if !words.isEmpty {
-                            Button("清空") {
-                                state.config.hotwords = []
-                                persist()
-                            }
-                            .buttonStyle(.link)
-                        }
-                    }
-
-                    if words.count > 60 {
-                        WarnBanner(text: "超过 60 个词可能超出双向流式约 100 tokens 的上限，靠后的词可能不生效。建议只保留最容易识错的。",
-                                   tint: .orange)
-                    }
-
-                    if state.config.enableNonstream {
-                        WarnBanner(text: "「设置」里的二遍识别 enable_nonstream 是开着的 —— 实测这会让热词全部失效（「流式」→「流是」、「Claude」→「Cloth」）。依赖热词就把它关掉。",
-                                   tint: .red)
-                    }
-                }
+                PresetReplacementSection(state: state)
             }
             .padding(20)
         }
-        // 关键：给整页一个背景色。之前是裸 VStack + TextEditor，
-        // TextEditor 自带白底又铺满，整页看起来就是一张白纸。
         .background(Color(nsColor: .windowBackgroundColor))
-        // 在批量编辑状态下直接切页会把整段编辑丢掉，离开时补一次保存
-        .onDisappear { if bulkMode { applyBulk() } }
-    }
-
-    // MARK: -
-
-    private func addWord() {
-        let w = newWord.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !w.isEmpty else { return }
-        guard !state.config.hotwords.contains(w) else { newWord = ""; return }
-        state.config.hotwords.append(w)
-        newWord = ""
-        inputFocused = true
-        persist()
-    }
-
-    private func removeWord(_ w: String) {
-        state.config.hotwords.removeAll { $0 == w }
-        persist()
-    }
-
-    private func applyBulk() {
-        state.config.hotwords = bulkText
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .reduce(into: [String]()) { acc, w in if !acc.contains(w) { acc.append(w) } }
-        persist()
-    }
-
-    private func loadSamples() {
-        state.config.hotwords = ["Claude Code", "豆包", "火山引擎", "WebSocket",
-                                 "流式语音识别", "上屏", "热词", "Swift", "Xcode"]
-        persist()
-    }
-
-    private func persist() {
-        // 同上：只提交词库，不连带提交设置页的草稿
-        let words = state.config.hotwords
-        state.commitField { $0.hotwords = words }
-        state.onReloadConfig?()
-        justSaved = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { justSaved = false }
     }
 }
 
-// MARK: - 预设词库
+// MARK: - 预设替换规则
 
-/// 官方维护的预设词库（数据在仓库 wordlists/，App 每天自动从 GitHub 同步）。
-/// 用户自己的热词永远优先于预设词 —— 直传 context 只有约 100 tokens。
-private struct PresetWordlistSection: View {
+private struct PresetReplacementSection: View {
     @ObservedObject var state: AppState
     @ObservedObject var store = WordlistStore.shared
 
+    private var availableLists: [Wordlist] {
+        store.lists.filter { !$0.replaceRules.isEmpty }
+    }
+
     var body: some View {
-        GroupBox("预设词库") {
+        GroupBox("预设替换规则") {
             VStack(alignment: .leading, spacing: 10) {
-                if store.lists.isEmpty {
-                    Text("没有可用的预设词库（安装包不完整？）")
+                if availableLists.isEmpty {
+                    Text("没有可用的预设替换规则")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                ForEach(store.lists) { list in
+                ForEach(availableLists) { list in
                     HStack(alignment: .top, spacing: 10) {
                         Toggle("", isOn: binding(for: list.id))
                             .labelsHidden()
@@ -323,10 +180,10 @@ private struct PresetWordlistSection: View {
                             HStack(spacing: 6) {
                                 Text(list.name)
                                     .font(.system(size: 13, weight: .medium))
-                                Text("\(list.hotwords.count) 词 · \(list.replaceRules.count) 条替换 · v\(list.version)")
+                                Text("\(list.replaceRules.count) 条本地替换 · v\(list.version)")
                                     .font(.caption).foregroundStyle(.tertiary)
                             }
-                            Text(list.description)
+                            Text("用于在本机纠正常见误识别，不会修改服务端识别配置。")
                                 .font(.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -346,7 +203,7 @@ private struct PresetWordlistSection: View {
                     }
                     Spacer()
                 }
-                Text("词库由官方仓库维护，每天自动同步 —— 仓库里加了新词，全体用户次日就能用上，不用等发版。热词直传有约 60 词的窗口：你自己的热词永远最优先，其后按上面的顺序取,开太多库时靠后的会被截断；替换规则不受此限制。")
+                Text("预设规则由 Viva 仓库维护并定期同步，应用时仍只在本机处理识别文本。")
                     .font(.caption).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -370,8 +227,6 @@ private struct PresetWordlistSection: View {
 
 // MARK: - 替换词表
 
-/// 确定性纠正：热词只能提高概率，替换是板上钉钉。
-/// 「Cloth Code→Claude Code」这类顽固错误、以及主界面「记住改法」学来的规则都在这里。
 private struct ReplaceRuleSection: View {
     @ObservedObject var state: AppState
     @State private var newFrom = ""
@@ -380,7 +235,7 @@ private struct ReplaceRuleSection: View {
     var body: some View {
         GroupBox("替换词表（改词记忆）") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("识别结果里出现左边的词，一律替换成右边的。热词纠不动的顽固错误靠它 —— 识别完在主界面改一次错字，也会自动提示「记住改法」加进这里。")
+                Text("识别结果里出现左边的内容时，在本机替换成右边的内容。主界面保存的「记住改法」也会出现在这里。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -450,134 +305,84 @@ private struct ReplaceRuleSection: View {
     }
 }
 
-// MARK: - 热词标签流式布局
-
-private struct WordChips: View {
-    let words: [String]
-    let onDelete: (String) -> Void
-
-    var body: some View {
-        FlowLayout(spacing: 7) {
-            ForEach(words, id: \.self) { w in
-                HStack(spacing: 5) {
-                    Text(w).font(.system(size: 12))
-                    Button {
-                        onDelete(w)
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.borderless)
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(Color.accentColor.opacity(0.12),
-                            in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.25)))
-            }
-        }
-    }
-}
-
-/// SwiftUI 没有内置流式布局，自己实现一个最小版
-private struct FlowLayout: Layout {
-    var spacing: CGFloat = 8
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? 400
-        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
-        for v in subviews {
-            let s = v.sizeThatFits(.unspecified)
-            if x + s.width > maxWidth, x > 0 {
-                x = 0; y += rowHeight + spacing; rowHeight = 0
-            }
-            x += s.width + spacing
-            rowHeight = max(rowHeight, s.height)
-        }
-        return CGSize(width: maxWidth, height: y + rowHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
-                       subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
-        for v in subviews {
-            let s = v.sizeThatFits(.unspecified)
-            if x + s.width > bounds.maxX, x > bounds.minX {
-                x = bounds.minX; y += rowHeight + spacing; rowHeight = 0
-            }
-            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
-            x += s.width + spacing
-            rowHeight = max(rowHeight, s.height)
-        }
-    }
-}
-
 // MARK: - 设置页
 
 struct SettingsView: View {
     @ObservedObject var state: AppState
     @State private var saved = false
-
-    // 在线拉取到的模型列表（见 ModelCatalog）
-    @State private var catalog: [ModelCatalog.Entry] = []
-    @State private var catalogLoading = false
-    @State private var catalogError = ""
-    /// 换服务商时清掉了上一家的 Key，要明确告诉用户，否则会以为配置丢了
-    @State private var keyCleared = false
-    /// 在飞的拉取请求。换服务商时要能取消，否则旧响应会覆盖新配置。
-    @State private var catalogTask: Task<Void, Never>?
+    @State private var developerServiceExpanded = false
 
     var body: some View {
         ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
 
-                GroupBox("凭证") {
-                    VStack(alignment: .leading, spacing: 9) {
-                        LabeledRow("API Key") {
-                            SecureField("火山引擎控制台的 x-api-key", text: $state.config.apiKey)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        LabeledRow("Resource ID") {
-                            TextField("volc.seedasr.sauc.duration",
-                                      text: $state.config.resourceId)
-                                .textFieldStyle(.roundedBorder)
+                AccountView(
+                    client: ManagedBackendAuth.shared,
+                    showsDeveloperCode: state.appliedConfig.testModeEnabled,
+                    onProfileChange: { state.accountProfile = $0 }
+                )
+                .id(state.appliedConfig.selectedBackendBaseURLString)
+
+                GroupBox("Viva 服务") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Label(state.appliedConfig.testModeEnabled ? "开发者测试环境" : "Viva 托管环境",
+                                  systemImage: state.appliedConfig.testModeEnabled
+                                    ? "wrench.and.screwdriver" : "checkmark.shield.fill")
+                                .font(.system(size: 13, weight: .medium))
+                            Spacer()
+                            Text(state.appliedConfig.hasValidBackendConfiguration ? "服务地址已就绪" : "服务地址无效")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(state.appliedConfig.hasValidBackendConfiguration
+                                                 ? Color.green : Color.orange)
                         }
 
-                        DisclosureGroup("用的是旧版控制台？") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("新版控制台只需上面那个 API Key。如果你的账号还是旧版（控制台给的是 App ID + Access Token 两个值），填下面这两项，上面的 API Key 留空。")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                LabeledRow("App ID") {
-                                    TextField("控制台的 APP ID", text: $state.config.appKey)
-                                        .textFieldStyle(.roundedBorder)
-                                }
-                                LabeledRow("Access Token") {
-                                    SecureField("控制台的 Access Token",
-                                                text: $state.config.accessKey)
-                                        .textFieldStyle(.roundedBorder)
+                        VivaServiceRoutingView(config: state.appliedConfig)
+
+                        Divider()
+
+                        DisclosureGroup(isExpanded: $developerServiceExpanded) {
+                            VStack(alignment: .leading, spacing: 9) {
+                                Toggle("连接本机测试服务",
+                                       isOn: $state.config.testModeEnabled)
+
+                                if state.config.testModeEnabled {
+                                    LabeledRow("本地服务 URL") {
+                                        TextField(Config.defaultTestBackendBaseURL,
+                                                  text: $state.config.testBackendBaseURL)
+                                            .textFieldStyle(.roundedBorder)
+                                            .font(.system(.body, design: .monospaced))
+                                    }
+                                    Text("只接受单个 loopback origin：localhost、127.0.0.0/8 或 ::1；REST 与 WebSocket 必须由该 origin 统一代理。")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    if let error = state.config.backendConfigurationError {
+                                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                                            .font(.caption).foregroundStyle(.orange)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    HStack {
+                                        Button("恢复本地默认值") {
+                                            state.config.testBackendBaseURL = Config.defaultTestBackendBaseURL
+                                        }
+                                        .controlSize(.small)
+                                        Spacer()
+                                    }
+                                } else {
+                                    Text("仅供开发和联调使用。普通用户保持关闭即可。")
+                                        .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
-                            .padding(.top, 6)
+                            .padding(.top, 4)
+                        } label: {
+                            Label("开发者选项", systemImage: "wrench.and.screwdriver")
+                                .font(.callout.weight(.medium))
                         }
-                        .font(.caption)
-                        HStack(spacing: 10) {
-                            Button("获取 API Key") {
-                                NSWorkspace.shared.open(URL(string: "https://console.volcengine.com/speech/new/setting/apikeys?projectName=default")!)
-                            }
-                            .buttonStyle(.link)
-                            Text("需先开通「豆包流式语音识别模型 2.0」")
-                                .font(.caption).foregroundStyle(.tertiary)
-                            Spacer()
-                        }
-                        Text("豆包流式语音识别 2.0 = volc.seedasr.sauc.duration（1 元/小时）。1.0 是 volc.bigasr.sauc.duration，贵 4.5 倍，没有理由用。⚠️ 这个 Key 与「大模型润色」用的方舟 Key 不是同一套，两边账号体系独立。")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(6)
                 }
+                .id("service")
 
                 PermissionsSettingsSection(state: state)
 
@@ -626,23 +431,6 @@ struct SettingsView: View {
 
                 GroupBox("上屏节奏") {
                     VStack(alignment: .leading, spacing: 9) {
-                        Picker("判停档位", selection: $state.config.endWindowSize) {
-                            Text("快嘴 300ms — 上屏最碎最快").tag(300)
-                            Text("推荐 600ms").tag(600)
-                            Text("标准 800ms — 官方默认").tag(800)
-                            Text("思考 1500ms — ⚠️ 会丧失逐句上屏").tag(1500)
-                        }
-                        .frame(width: 380)
-
-                        Label {
-                            Text("**实测结论**：判停时长必须小于你说话时的自然停顿，否则「边说边打字」会退化成「说完才一次性上屏」。测试中设成 1500ms 后，句间停顿 900ms 的三句话全部憋到末尾才吐出来。真人换气通常 0.4–1.0 秒，**300–600ms 是安全区**。")
-                            // ⚠️ 这里必须用连接号「–」而不是「~」：SwiftUI 的 Text 会把字符串
-                            //    当 Markdown 解析，一句话里出现两个 ~ 就成了删除线标记，
-                            //    实测把「1.0 秒，**300」整段划掉了。
-                        } icon: { Image(systemName: "exclamationmark.triangle") }
-                        .font(.caption).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-
                         Toggle("松手才上屏（不逐句上屏）", isOn: $state.config.commitOnlyAtEnd)
 
                         Divider()
@@ -650,7 +438,7 @@ struct SettingsView: View {
                         Toggle("连续听写：长句中途也逐段上屏", isOn: $state.config.progressiveCommit)
                             .disabled(state.config.commitOnlyAtEnd)
                         Label {
-                            Text("服务端只在你**停顿**时才定稿一句。一口气说长句不换气时，文字会全部憋到说完 —— 开启后，已经稳定、以标点收尾的部分会提前写进光标处。**开了 AI 润色时此功能自动让位**（润色需要拿全文重写）。\n配合**双击 \(HotkeyManager.describe(state.config)) 锁定**使用：双击开始连续听写，不用一直按着，再按一下结束。长文口述、会议记录都是这么用。")
+                            Text("开启后，客户端会把已经稳定、以标点收尾的部分提前写进光标处。**启用任意 AI 处理模式时此功能自动让位**（AI 需要拿全文处理）。\n配合**双击 \(HotkeyManager.describe(state.config)) 锁定**使用：双击开始连续听写，不用一直按着，再按一下结束。")
                         } icon: { Image(systemName: "infinity") }
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -669,287 +457,46 @@ struct SettingsView: View {
 
                 AppProfileSection(state: state)
 
-                GroupBox("识别选项") {
+                GroupBox("文本整理") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("自动标点", isOn: $state.config.enablePunc)
-                        Toggle("数字规范化（「二零二六年」→「2026年」）",
-                               isOn: $state.config.enableItn)
-                        Toggle("语义顺滑（去掉「嗯」「那个」等口水词）",
-                               isOn: $state.config.enableDdc)
-
                         Toggle("去掉末尾句号（「今天开会。」→「今天开会」）",
                                isOn: $state.config.stripTrailingPeriod)
-                            .disabled(!state.config.enablePunc)
                         Label {
-                            Text("语音输入十有八九是往聊天框、搜索框、命令行里塞一句话，那个句号既多余又得手动删。**只去句号** —— 问号和感叹号带语气，去掉会改变意思；省略号「……」也会原样保留。\n逐句上屏时用的是「先扣下、下一句到了再补回去」，不是事后退格删 —— 本工具任何情况下都不会回头改已经写进你输入框的内容。")
+                            Text("识别结果以句号收尾时，由客户端在写入前去掉它。**只去句号**；问号、感叹号和省略号会原样保留。")
                         } icon: { Image(systemName: "text.badge.minus") }
                         .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                        Divider()
-
-                        HStack {
-                            Text("中文字形").frame(width: 92, alignment: .leading)
-                            Picker("", selection: $state.config.zhVariant) {
-                                Text("简体（默认）").tag("")
-                                Text("繁体").tag("traditional")
-                                Text("台湾正体").tag("tw")
-                                Text("香港繁体").tag("hk")
-                            }
-                            .labelsHidden()
-                            .frame(width: 160)
-                            Spacer()
-                        }
-
-                        Toggle("极速模式（首字更快，但首字准确率下降）",
-                               isOn: $state.config.accelerateFirstChar)
-                        Label {
-                            Text("enable_accelerate_text：服务端更激进地吐首字，实测能快 100~200ms，代价是开头个别字更容易识错。追求「按下就出字」的手感再开。")
-                        } icon: { Image(systemName: "hare") }
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                        Toggle("对话上下文（把最近几条识别结果带给服务端）",
-                               isOn: $state.config.enableDialogContext)
-                        Label {
-                            Text("连着说几段话时，服务端能接住上文语境，人名、术语的识别明显更稳。只发送**最近三条识别文本** —— 它们本来就是这家服务识别出来的，不产生新的数据暴露；不发送 App 名等任何额外信息。")
-                        } icon: { Image(systemName: "text.bubble") }
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                        Divider()
-                        Toggle("二遍识别 enable_nonstream", isOn: $state.config.enableNonstream)
-                        Label {
-                            Text("⚠️ **实测 3/3 复现：开启后热词会失效**（「流式」→「流是」、「Claude」→「Cloth」、「上屏」→「尚平」）。它在句子完整性和尾字上确实更好，但如果你依赖热词，请保持关闭。这与官方「又快又准」的说法不符，以实测为准。")
-                        } icon: { Image(systemName: "exclamationmark.triangle") }
-                        .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(6)
                 }
 
-                GroupBox("大模型润色") {
-                    VStack(alignment: .leading, spacing: 9) {
-                        Toggle("识别完成后用大模型润色", isOn: $state.config.enablePolish)
+                GroupBox("大模型处理") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker("AI 处理模式", selection: Binding(
+                            get: { state.config.aiProcessingMode },
+                            set: { state.config.aiProcessingMode = $0 })) {
+                            ForEach(AIProcessingMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
 
                         Label {
-                            Text("**这是一个开关，两种工作方式二选一：**\n· **关闭润色** → 逐句直接写进输入框，真正的边说边写\n· **开启润色** → 说话时文字只显示在底部悬浮窗，松手后交给大模型润色，润完再一次性粘贴到输入框\n\n为什么不能兼得：润色必须拿到完整文本才能做，而边说边写意味着文字已经写进去了，之后再改就得退格删你屏幕上的内容。Wispr Flow、superwhisper 这些带 AI 润色的产品全都是「松手后整段插入」，原因就在这里。")
+                            Text(state.config.aiProcessingMode.detail)
                         } icon: { Image(systemName: "info.circle") }
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                        Divider()
+                        if state.config.aiProcessingMode != .off {
+                            Label("使用 Viva 托管模型 · 无需填写模型名或 API Key",
+                                  systemImage: "checkmark.shield.fill")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.green)
 
-                        Toggle("改口自动纠正（说错了直接重说，只保留最终意思）",
-                               isOn: $state.config.enableCourseCorrection)
-                        Label {
-                            Text("「明天上午九点，**啊不对，下午三点**」→ 上屏只有「明天下午三点」。自动处理当场改口、口吃重复、犹豫填充词、说到一半放弃的半句；引用别人说的「不对」不会被误改，拿不准的一律保留原样。可以和润色同时开（一次调用完成），也可以只开这一个 —— 只改口，不动你的措辞风格。")
-                        } icon: { Image(systemName: "arrow.uturn.backward.circle") }
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                        // 刚打开却还没配模型 —— 当场把最短的路摆出来（推荐 DeepSeek V4 Flash）
-                        if state.config.enableCourseCorrection, !state.config.llmCredentialsReady {
-                            CourseCorrectionSetupCard {
-                                applyProvider(LLMProvider.find("deepseek"))
-                                state.config.polishModel = "deepseek-v4-flash"
-                            }
-                        }
-
-                        if state.config.enablePolish || state.config.enableCourseCorrection {
-                            Text("代价：上屏比直接识别晚约 0.5~2 秒（取决于模型速度）。超时或调用失败会自动退回原文上屏，不会丢内容。")
-                                .font(.caption).foregroundStyle(.orange)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Divider()
-
-                            let prov = LLMProvider.find(state.config.polishProvider)
-
-                            RelayBanner(isCurrent: prov.id == LLMProvider.relayID,
-                                        onUse: switchToRelay)
-
-                            HStack {
-                                Text("服务商").frame(width: 74, alignment: .leading)
-                                Picker("", selection: $state.config.polishProvider) {
-                                    ForEach(LLMProvider.all) { p in
-                                        Text(p.name).tag(p.id)
-                                    }
-                                }
-                                .labelsHidden()
-                                .frame(width: 220)
-                                .onChange(of: state.config.polishProvider) { _, new in
-                                    // 地址、协议、端点、模型一次性对齐，并清空上一家的 Key
-                                    applyProvider(LLMProvider.find(new))
-                                }
-                                if let u = prov.keyURL {
-                                    Button("获取 Key") {
-                                        NSWorkspace.shared.open(URL(string: u)!)
-                                    }
-                                    .buttonStyle(.link)
-                                }
-                                Spacer()
-                            }
-
-                            HStack {
-                                Text("协议格式").frame(width: 74, alignment: .leading)
-                                Picker("", selection: $state.config.polishAPIFormat) {
-                                    ForEach(APIFormat.allCases) { f in
-                                        Text(f.label).tag(f.rawValue)
-                                    }
-                                }
-                                .labelsHidden().frame(width: 300)
-                                .onChange(of: state.config.polishAPIFormat) { _, new in
-                                    // 换协议就把端点路径换成该协议的默认值
-                                    if let f = APIFormat(rawValue: new) {
-                                        state.config.polishPath = f.defaultPath
-                                    }
-                                }
-                                Spacer()
-                            }
-                            Text(state.config.apiFormat.hint)
+                            Toggle("流式显示 AI 处理过程", isOn: $state.config.polishStream)
+                            Text("只影响悬浮条的实时反馈；最终仍会等待完整结果后再上屏，避免半截文本进入当前应用。")
                                 .font(.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
-
-                            LabeledRow("服务地址") {
-                                TextField("", text: $state.config.polishBaseURL)
-                                    .textFieldStyle(.roundedBorder)
-                            }
-                            HStack {
-                                Text("端点路径").frame(width: 74, alignment: .leading)
-                                TextField("/chat/completions", text: $state.config.polishPath)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 200)
-                                Text("绝大多数服务是 /chat/completions")
-                                    .font(.caption).foregroundStyle(.tertiary)
-                                Spacer()
-                            }
-                            LabeledRow("API Key") {
-                                SecureField(prov.id == "ollama"
-                                            ? "本地不校验，随便填个非空串如 ollama"
-                                            : "该服务商的 API Key",
-                                            text: $state.config.polishApiKey)
-                                    .textFieldStyle(.roundedBorder)
-                                    // ⚠️ 只在**新值非空**时复位。applyProvider 自己会把
-                                    //   polishApiKey 置空，那次赋值同样会触发这个 onChange ——
-                                    //   无条件复位的话，keyCleared 在同一个 runloop turn 里
-                                    //   被立刻打回 false，那条橙色提示一帧都留不住，
-                                    //   用户只会看到 Key 凭空消失、测试连接和拉取模型双双置灰。
-                                    .onChange(of: state.config.polishApiKey) { _, new in
-                                        if !new.isEmpty { keyCleared = false }
-                                    }
-                            }
-                            if keyCleared {
-                                Label {
-                                    Text("已清空上一家的 Key —— Key 是和服务商绑定的，换了服务商必须重填。（不清空的话，下次润色会把上一家的 Key 发到这个新地址去。）")
-                                } icon: { Image(systemName: "key.slash") }
-                                .font(.caption).foregroundStyle(.orange)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(.leading, 78)
-                            }
-                            HStack {
-                                Text("模型").frame(width: 74, alignment: .leading)
-                                TextField("模型 id", text: $state.config.polishModel)
-                                    .textFieldStyle(.roundedBorder)
-
-                                // 在线拉取到的列表优先 —— 它一定是最新的，
-                                // 而写死的预设表迟早会过期（见 LLMProvider 注释）
-                                if !catalog.isEmpty {
-                                    Menu("可用 \(catalog.count)") {
-                                        ForEach(catalog) { m in
-                                            Button(m.note.isEmpty ? m.id : "\(m.id) — \(m.note)") {
-                                                state.config.polishModel = m.id
-                                            }
-                                        }
-                                    }
-                                    .fixedSize()
-                                } else if !prov.models.isEmpty {
-                                    Menu("建议") {
-                                        ForEach(prov.models, id: \.id) { m in
-                                            Button("\(m.id) — \(m.note)") {
-                                                state.config.polishModel = m.id
-                                            }
-                                        }
-                                    }
-                                    .fixedSize()
-                                }
-
-                                if prov.supportsModelList {
-                                    Button(catalogLoading ? "拉取中…" : "拉取模型") { fetchModels() }
-                                        .disabled(catalogLoading
-                                                  || state.config.polishBaseURL.isEmpty
-                                                  || (state.config.polishApiKey.isEmpty
-                                                      && state.config.apiFormat != .ollamaNative))
-                                        .fixedSize()
-                                }
-                            }
-
-                            if catalogLoading || !catalogError.isEmpty || !catalog.isEmpty {
-                                HStack(spacing: 6) {
-                                    if catalogLoading { ProgressView().controlSize(.small) }
-                                    Text(catalogLoading
-                                         ? "正在向服务端要模型列表…"
-                                         : (catalogError.isEmpty
-                                            ? "已拉到 \(catalog.count) 个可用模型（已过滤掉向量/语音/画图这类不能用来润色的）。"
-                                            : catalogError))
-                                        .font(.caption)
-                                        .foregroundStyle(catalogError.isEmpty ? .secondary : Color.orange)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                    Spacer()
-                                }
-                                .padding(.leading, 78)
-                            }
-
-                            if prov.id == "custom" {
-                                HStack {
-                                    Text("关闭思考").frame(width: 74, alignment: .leading)
-                                    Picker("", selection: $state.config.polishThinkingOff) {
-                                        ForEach([LLMProvider.ThinkingOff.none,
-                                                 .thinkingDisabled,
-                                                 .enableThinkingFalse,
-                                                 .reasoningEffortNone], id: \.rawValue) { t in
-                                            Text(t.label).tag(t.rawValue)
-                                        }
-                                    }
-                                    .labelsHidden().frame(width: 260)
-                                    Spacer()
-                                }
-                            }
-
-                            Text(prov.hint)
-                                .font(.caption).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Divider()
-
-                            Toggle("把当前 App 名一并发给模型（按场景调整语气）",
-                                   isOn: $state.config.sendAppContext)
-                            Label {
-                                Text("**默认关闭。** 打开后，润色请求里会多一句「当前用户正在「微信」中输入」，让模型知道该用什么语气 —— 在终端里和在聊天框里，同一句话该润成不同样子。\n⚠️ 代价是每说一句就等于告诉服务商**你此刻在用哪个 App**（1Password、Signal、公司内部工具都会被记上一笔）。这是识别文本之外的额外数据，所以做成默认关、由你自己决定。")
-                            } icon: { Image(systemName: "hand.raised") }
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                            Label {
-                                Text("⚠️ **当代模型几乎全都默认开启「深度思考」，而每家关闭的写法都不一样。** 润色一两句话本来该 1 秒内返回，开着思考会先吐一大段思维链——延迟涨到几秒，思维链还按输出 token 计费。上面的预设已经帮你按服务商传了正确的关闭参数；如果「测试连接」提示带思维链，说明没生效。")
-                            } icon: { Image(systemName: "bolt.slash") }
-                            .font(.caption).foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                            Toggle("开启深度思考", isOn: Binding(
-                                get: { !state.config.polishDisableThinking },
-                                set: { state.config.polishDisableThinking = !$0 }))
-                            Label {
-                                Text("**默认关闭，建议保持关闭。** 当代模型大多默认开启思考，而润色一两句话根本不需要推理——开着会让延迟从 1 秒涨到几秒，思维链还按输出 token 计费，某些服务甚至会因此让正文返回空串。只有在润色质量确实不满意时才打开试试。")
-                            } icon: { Image(systemName: "brain") }
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                            Toggle("流式输出", isOn: $state.config.polishStream)
-                            Label {
-                                Text("**不会让总耗时变快** —— 模型要生成的 token 数一样，流式只是把「等全部生成完」改成「生成一个吐一个」，端到端时间基本相同。收益在感知：悬浮条里能看到文字被逐字修正，而不是盯着「润色中…」发呆。而且上屏时刻完全没变 —— 润色结果必须等全文完成才能粘贴，粘半截比不润色更糟。短句几乎无差别，长段口述差别明显。")
-                            } icon: { Image(systemName: "info.circle") }
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
 
                             HStack {
                                 Text("最长等待").frame(width: 74, alignment: .leading)
@@ -958,17 +505,17 @@ struct SettingsView: View {
                                     set: { state.config.polishTimeoutMs = Int($0) }),
                                        in: 1000...5000, step: 500)
                                     .frame(width: 220)
-                                Text(String(format: "%.1f 秒", Double(state.config.polishTimeoutMs) / 1000))
+                                Text(String(format: "%.1f 秒",
+                                            Double(state.config.polishTimeoutMs) / 1000))
                                     .monospacedDigit()
                                     .font(.caption).foregroundStyle(.secondary)
                             }
-                            Text("超过这个时间模型还没返回就**放弃润色，直接上屏原始识别结果**，不会丢内容、不会一直干等。说长文时会按字数自动略放宽（每字 +30ms），短句以这里为准。")
+                            Text("这是基础等待时间；为避免长文本被过早截断，实际总预算还会按每个字符增加约 30 ms。")
                                 .font(.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
 
                             Divider()
 
-                            // ── 测试连接 ──
                             VStack(alignment: .leading, spacing: 7) {
                                 HStack(spacing: 10) {
                                     Button {
@@ -980,39 +527,28 @@ struct SettingsView: View {
                                                 Text("测试中…")
                                             }
                                         } else {
-                                            Text("测试连接")
+                                            Text("测试托管模型")
                                         }
                                     }
-                                    // Ollama 本地服务不校验鉴权（Config.polishReady 也对它豁免），
-                                    // 漏掉这条豁免会让这类用户永远点不了「测试连接」，
-                                    // 没有任何办法在真正说话之前验证润色是否可用。
-                                    // 判据与上面「拉取模型」保持一致。
                                     .disabled(state.polishTestRunning
-                                              || (state.config.polishApiKey.isEmpty
-                                                  && state.config.apiFormat != .ollamaNative)
-                                              || state.config.polishModel.isEmpty)
+                                              || !state.config.hasValidBackendConfiguration)
 
                                     if let ms = state.polishTestMs {
                                         Text("\(ms) ms").font(.caption)
                                             .foregroundStyle(ms < 2000 ? .green : .orange)
                                             .monospacedDigit()
                                     }
-                                    if state.polishTestLeaked {
-                                        Label("返回带思维链，关闭思考未生效",
-                                              systemImage: "exclamationmark.triangle.fill")
-                                            .font(.caption).foregroundStyle(.orange)
-                                    }
                                     Spacer()
                                 }
 
-                                if let e = state.polishTestError {
-                                    Text(e).font(.caption).foregroundStyle(.red)
+                                if let error = state.polishTestError {
+                                    Text(error).font(.caption).foregroundStyle(.red)
                                         .fixedSize(horizontal: false, vertical: true)
-                                } else if let o = state.polishTestOutput {
+                                } else if let output = state.polishTestOutput {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text("原文　嗯那个我们今天下午三点开个会讨论一下豆包流是语音识别的接入方案就是说那个接口的部分")
                                             .font(.caption).foregroundStyle(.tertiary)
-                                        Text("润色后　\(o)")
+                                        Text("处理后　\(output)")
                                             .font(.system(size: 12.5))
                                             .textSelection(.enabled)
                                     }
@@ -1027,7 +563,6 @@ struct SettingsView: View {
                     }
                     .padding(6)
                 }
-
 
                 GroupBox("上屏方式") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1088,14 +623,16 @@ struct SettingsView: View {
 
                 GroupBox("数据与隐私") {
                     VStack(alignment: .leading, spacing: 8) {
-                        // ⚠️ 这段必须分层说。原来只有一句「不经过任何第三方服务器」，
-                        //    但「大模型润色」一旦配到中转站，润色文本就确实经过第三方了 ——
-                        //    而且那个第三方是本项目作者运营的。代码是开源的，含糊其辞一定会被扒出来，
-                        //    主动写清楚 + 给出本地替代方案，比事后解释划算得多。
-                        Text("**语音识别**：音频只发往你自己配置的火山引擎账号，不经过任何第三方服务器。")
+                        Text("**语音识别**：音频加密发送到 Viva 服务，再由服务端转发至已配置的语音识别供应商。供应商长期密钥不会下发到客户端。")
                             .font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("**大模型润色**：只有开启润色时才会发生，且只发送识别出的文本（不发音频），发往你在上面选的那家服务商。⚠️ 它是**默认服务商**：如果你没有换过，文本会经过 bobdong.cn 中转到目标模型 —— 该中转站由本项目作者运营，是本项目的收入来源。介意的话，换成任意其它服务商，或者选 Ollama 做完全本地的润色。\n另外：只有当你手动打开「把当前 App 名一并发给模型」时，请求里才会额外带上你所在 App 的名字；默认是关的。")
+                        Text("**大模型处理**：只有开启润色或口误纠正时才发送识别文本到 Viva 服务，不重复发送音频。模型、Prompt 和上游路由由服务端统一管理。当前客户端不会发送目标 App 标识或历史正文。")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("**登录状态**：正式发布版使用系统钥匙串；当前本地开发版保存在仅当前 Mac 用户可读的本机会话文件中，重新编译后不会索取系统密码。")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("**本地测试模式**：语音和文本都改发到你填写的本地项目 URL。客户端要求同一 origin 同时代理 `/v1/asr/stream` 与 `/v1/text/*`，避免暴露多个可编辑上游入口。")
                             .font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
                         Text("全部保存在本机这个目录下，已按类别分开存放 —— 顶层 `config.json` 才是配置，其余各归子目录，重置配置不会误伤历史/证书：")
@@ -1103,7 +640,8 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         Text("""
                         \(Config.configDir.path)/
-                          ├─ config.json   配置（API Key、热词、各项设置）
+                          ├─ config.json   配置（不含供应商 API Key）
+                          ├─ auth/         当前设备登录会话
                           ├─ data/         识别历史
                           ├─ logs/         运行日志
                           ├─ crashes/      崩溃报告
@@ -1151,39 +689,69 @@ struct SettingsView: View {
                     .padding(6)
                 }
 
-                HStack {
-                    Button("保存并应用") {
-                        state.saveConfig()
-                        state.onReloadConfig?()
-                        saved = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { saved = false }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut("s")
-
-                    if saved {
-                        Label("已保存并生效", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green).font(.callout)
-                    }
-                    Spacer()
-                    VivaMark(size: 18)
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text("Viva \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
-                            .font(.caption).foregroundStyle(.tertiary)
-                        Text("Just say Viva")
-                            .font(.system(size: 10, weight: .medium, design: .rounded))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
             }
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            settingsSaveBar
+        }
         // 从主页「修改快捷键」进来：滚到热键那一节。
         // onAppear 兜底（跳转时本页往往刚挂载，onChange 赶不上）。
-        .onAppear { consumePendingAnchor(proxy) }
+        .onAppear {
+            if state.config.testModeEnabled { developerServiceExpanded = true }
+            consumePendingAnchor(proxy)
+        }
+        .onChange(of: state.config.testModeEnabled) { _, enabled in
+            if enabled { developerServiceExpanded = true }
+        }
         .onChange(of: state.pendingSettingsAnchor) { _, _ in consumePendingAnchor(proxy) }
         }
+    }
+
+    private var settingsSaveBar: some View {
+        HStack(spacing: 10) {
+            Group {
+                if state.hasUnsavedChanges {
+                    Label("有未保存更改", systemImage: "circle.fill")
+                        .foregroundStyle(.orange)
+                } else if saved {
+                    Label("已保存并生效", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Label("所有设置已生效", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.callout)
+
+            Spacer()
+
+            if state.hasUnsavedChanges {
+                Button {
+                    state.config = state.appliedConfig
+                    saved = false
+                } label: {
+                    Label("还原", systemImage: "arrow.uturn.backward")
+                }
+            }
+
+            Button {
+                state.saveConfig()
+                state.onReloadConfig?()
+                saved = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { saved = false }
+            } label: {
+                Label("保存并应用", systemImage: "checkmark")
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut("s")
+            .disabled(!state.hasUnsavedChanges)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
     }
 
     private func consumePendingAnchor(_ proxy: ScrollViewProxy) {
@@ -1208,7 +776,7 @@ private struct AppProfileSection: View {
     var body: some View {
         GroupBox("按 App 自动切换") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("给特定 App 单独定行为：在这些 App 里说话时，下面勾选的项覆盖全局设置，其余照旧。典型用法：终端/IDE 关润色、用逐字键入（不污染剪贴板）；微信/飞书开润色。")
+                Text("给特定 App 单独定行为：在这些 App 里说话时，下面选项覆盖全局设置，其余照旧。典型用法：终端/IDE 关闭 AI 处理并逐字键入；微信/飞书开启口误纠正或轻度润色。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -1244,7 +812,8 @@ private struct ProfileRow: View {
                 .buttonStyle(.borderless)
             }
             HStack(spacing: 14) {
-                tri("AI 润色", \.enablePolish)
+                tri("轻度润色", \.enablePolish)
+                tri("口误纠正", \.enableCourseCorrection)
                 tri("剪贴板上屏", \.useClipboardPaste)
                 tri("连续听写", \.progressiveCommit)
                 Spacer()
@@ -1718,218 +1287,6 @@ private struct InputLevelMeter: View {
     }
 }
 
-// MARK: - 中转站 / 模型列表
-
-    /// 换服务商时统一走这里。两个入口（服务商下拉、「用中转站配置」按钮）都必须调它。
-    ///
-    /// ⚠️⚠️ **必须清空 polishApiKey。**
-    ///   地址换了、Key 没换，下一次润色就会把上一家的 API Key 原样发到新服务商的
-    ///   域名去（`Authorization: Bearer <别人家的key>`）—— 这是实打实的凭证外泄，
-    ///   而且用户完全无从察觉。中转站是本项目作者运营的，一键切过去还把用户的
-    ///   DeepSeek/OpenAI Key 一起送过来，性质更严重。
-    ///
-    /// 顺带把协议和端点也一起重置：预设表里每一家都兼容 OpenAI Chat，
-    /// 不重置的话「Anthropic 的 /messages + DeepSeek 的地址」这种组合直接 404。
-    private func applyProvider(_ p: LLMProvider) {
-        state.config.polishProvider = p.id
-        if p.id != "custom" {
-            state.config.polishBaseURL = p.baseURL
-            state.config.polishAPIFormat = APIFormat.openAIChat.rawValue
-            state.config.polishPath = APIFormat.openAIChat.defaultPath
-            state.config.polishModel = p.models.first?.id ?? ""
-        }
-        if !state.config.polishApiKey.isEmpty {
-            state.config.polishApiKey = ""
-            keyCleared = true
-        }
-        // 上一家拉到的模型对这一家没有意义，留着会误导；在飞的请求也要掐掉
-        catalogTask?.cancel(); catalogTask = nil
-        catalog = []; catalogError = ""; catalogLoading = false
-    }
-
-    /// 一键切到中转站。地址、协议、端点一次性配好，只留 Key 要用户填 ——
-    /// 少一步就多一分转化，而这几个字段填错任何一个都是直接 404。
-    private func switchToRelay() {
-        applyProvider(LLMProvider.find(LLMProvider.relayID))
-    }
-
-    private func fetchModels() {
-        catalogTask?.cancel()
-        catalogLoading = true
-        catalogError = ""
-        let base = state.config.polishBaseURL
-        let key = state.config.polishApiKey
-        let fmt = state.config.apiFormat
-        // ⚠️ 连服务商一起快照，回写前必须比对。
-        //   请求最长 15 秒，用户等不及切到别家是很自然的事；旧响应回来时
-        //   若不校验归属，会把上一家的模型列表塞进新服务商的界面，
-        //   autoPick 还会因为「新家的默认模型不在旧家列表里」而把 polishModel
-        //   静默改成旧家的第一个模型 —— 配置变成「B 家地址 + A 家模型」，
-        //   保存后每次润色都 404，而界面上没有任何异常提示。
-        let snapProvider = state.config.polishProvider
-        catalogTask = Task { @MainActor in
-            defer { catalogLoading = false }
-            do {
-                let list = try await ModelCatalog.fetch(baseURL: base, apiKey: key, format: fmt)
-                guard !Task.isCancelled,
-                      state.config.polishProvider == snapProvider,
-                      state.config.polishBaseURL == base else { return }
-                catalog = list
-                state.config.polishModel = ModelCatalog.autoPick(list,
-                                                                 current: state.config.polishModel)
-            } catch {
-                guard !Task.isCancelled,
-                      state.config.polishProvider == snapProvider,
-                      state.config.polishBaseURL == base else { return }
-                catalog = []
-                catalogError = error.localizedDescription
-            }
-        }
-    }
-}
-
-// MARK: - 中转站转化位
-
-/// 「大模型润色」里的一张软广。
-///
-/// 放这里是有理由的：用户勾上润色开关的那一刻，正好撞上整个软件里最劝退的一段路 ——
-/// 要去某家云厂商注册、实名、充值、开通模型、建 Key、再抄一个大小写敏感的模型名回来。
-/// 转化位就该出现在痛点发生的地方，而不是首页横幅。
-///
-/// 分寸：只在**没在用中转站**时显示；不挡住任何原有选项；不做任何夸张承诺。
-/// 「改口纠正」刚打开但大模型还没配 —— 用户意图最强的一瞬间，
-/// 把最短的路当场摆出来：一键按 DeepSeek V4 Flash 配好一切，只留 Key 要填。
-private struct CourseCorrectionSetupCard: View {
-    /// 一键应用 DeepSeek 预设（服务商/地址/协议/模型 = deepseek-v4-flash）
-    let onApplyDeepSeek: () -> Void
-    @State private var applied = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(.orange)
-                .padding(.top, 2)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("还差一步：改口纠正要调一个大模型")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("推荐 **DeepSeek V4 Flash** —— 快、便宜（一句话不到一厘钱），改口这种活它绰绰有余。点下面一键配好服务商、地址和模型，然后去 DeepSeek 拿个 API Key 填进下方「API Key」栏即可。")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: 8) {
-                    Button(applied ? "已按 DeepSeek 配置 ✓" : "一键按 DeepSeek V4 Flash 配置") {
-                        onApplyDeepSeek()
-                        applied = true
-                    }
-                    .buttonStyle(.borderedProminent).controlSize(.small)
-                    .disabled(applied)
-
-                    Button("去拿 DeepSeek Key") {
-                        if let u = URL(string: "https://platform.deepseek.com/api_keys") {
-                            NSWorkspace.shared.open(u)
-                        }
-                    }
-                    .buttonStyle(.link).controlSize(.small)
-                    Spacer()
-                }
-            }
-        }
-        .padding(11)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color.orange.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.orange.opacity(0.30)))
-    }
-}
-
-/// 中转站品牌 banner。常驻在润色配置区顶部（选没选中转站都显示）——
-/// 这是 08 号营销方案里的「产品内转化位」，但要守住三条红线：
-/// 不弹窗、不挡功能、身份透明（数据与隐私一节已声明它是作者运营的收费服务）。
-private struct RelayBanner: View {
-    /// 当前服务商是否已是中转站（是 → 只留「前往」，不再劝切换）
-    let isCurrent: Bool
-    let onUse: () -> Void
-    @State private var hovering = false
-
-    private var site: String {
-        LLMProvider.relaySite.replacingOccurrences(of: "https://", with: "")
-            .components(separatedBy: "/").first ?? "bobdong.cn"
-    }
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "bolt.horizontal.circle.fill")
-                .font(.system(size: 22, weight: .medium))
-                .foregroundStyle(.white)
-
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
-                    Text("Viva 中转站")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                    Text(site)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.85))
-                    ForEach(["稳定", "高并发", "企业级"], id: \.self) { tag in
-                        Text(tag)
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Capsule().fill(.white.opacity(0.18)))
-                    }
-                }
-                Text("国内外主流模型共用一个 Key · 按量计费 · 生产级稳定性与并发，个人和企业都能直接接")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.85))
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 8)
-
-            if !isCurrent {
-                Button(action: onUse) {
-                    Text("一键使用")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(Color.purple)
-                        .padding(.horizontal, 11).padding(.vertical, 5)
-                        .background(Capsule().fill(.white))
-                }
-                .buttonStyle(.plain)
-            }
-            Button {
-                if let u = URL(string: LLMProvider.relaySite) {
-                    NSWorkspace.shared.open(u)
-                }
-            } label: {
-                HStack(spacing: 3) {
-                    Text(isCurrent ? "前往 \(site)" : "前往")
-                        .font(.system(size: 11.5, weight: .semibold))
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 9, weight: .bold))
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 11).padding(.vertical, 5)
-                .background(Capsule().strokeBorder(.white.opacity(0.55), lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 13).padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(LinearGradient(
-                    colors: [Color(red: 0.42, green: 0.30, blue: 0.95),
-                             Color(red: 0.72, green: 0.29, blue: 0.86)],
-                    startPoint: .leading, endPoint: .trailing))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(.white.opacity(hovering ? 0.35 : 0.15))
-        )
-        .shadow(color: Color.purple.opacity(hovering ? 0.35 : 0.2),
-                radius: hovering ? 10 : 6, y: 3)
-        .onHover { hovering = $0 }
-        .animation(.easeInOut(duration: 0.15), value: hovering)
-    }
 }
 
 // MARK: -

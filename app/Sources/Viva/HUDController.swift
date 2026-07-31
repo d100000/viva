@@ -232,13 +232,15 @@ final class HUDController {
                 ctx.duration = 0.18
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 p.animator().alphaValue = 0
-            } completionHandler: { [weak self] in
-                // 期间可能已经开了新会话（present 会把 fadingOut 置回 false），
-                // 这时绝不能把新会话的浮条收走
-                guard let self, self.fadingOut else { return }
-                self.fadingOut = false
-                p.orderOut(nil)
-                self.model.reset()
+            } completionHandler: { [weak self, weak p] in
+                Task { @MainActor [weak self, weak p] in
+                    // 期间可能已经开了新会话（present 会把 fadingOut 置回 false），
+                    // 这时绝不能把新会话的浮条收走
+                    guard let self, let p, self.fadingOut else { return }
+                    self.fadingOut = false
+                    p.orderOut(nil)
+                    self.model.reset()
+                }
             }
         }
         hideWork = item

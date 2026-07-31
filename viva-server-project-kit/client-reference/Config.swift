@@ -1,63 +1,5 @@
 import Foundation
 
-enum AIProcessingMode: String, Codable, CaseIterable, Identifiable, Hashable {
-    case off
-    case correction
-    case polish
-    case both
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .off: return "关闭"
-        case .correction: return "口误纠正"
-        case .polish: return "轻度润色"
-        case .both: return "润色并纠错"
-        }
-    }
-
-    var compactTitle: String {
-        switch self {
-        case .off: return "AI 关闭"
-        case .correction: return "口误纠正"
-        case .polish: return "轻度润色"
-        case .both: return "润色 + 纠错"
-        }
-    }
-
-    var detail: String {
-        switch self {
-        case .off:
-            return "不经过大模型，识别结果直接写入。"
-        case .correction:
-            return "处理“不是……是……”等口头改口，尽量保留原本表达。"
-        case .polish:
-            return "整理语气词、标点和轻微语病，不主动改变原意。"
-        case .both:
-            return "先判断最终意思并纠正口误，再做轻度文字整理；两步由服务端一次完成。"
-        }
-    }
-
-    var processingLabel: String {
-        switch self {
-        case .off: return "正在处理"
-        case .correction: return "正在检查口误"
-        case .polish: return "正在润色"
-        case .both: return "正在润色并纠错"
-        }
-    }
-
-    var resultNoun: String {
-        switch self {
-        case .off: return "AI 处理"
-        case .correction: return "口误纠正"
-        case .polish: return "润色"
-        case .both: return "AI 处理"
-        }
-    }
-}
-
 /// 按 App 的配置覆盖（Profile）。竞品标配：在终端里关润色 + 逐字键入,
 /// 在微信里开润色 + 剪贴板上屏。nil = 该项跟随全局配置。
 struct AppProfile: Codable, Equatable, Hashable, Identifiable {
@@ -65,7 +7,6 @@ struct AppProfile: Codable, Equatable, Hashable, Identifiable {
     /// 仅展示用；bundleId 才是匹配键
     var appName: String = ""
     var enablePolish: Bool? = nil
-    var enableCourseCorrection: Bool? = nil
     var useClipboardPaste: Bool? = nil
     var progressiveCommit: Bool? = nil
     var id: String { bundleId }
@@ -74,19 +15,41 @@ struct AppProfile: Codable, Equatable, Hashable, Identifiable {
 /// 运行期配置。
 ///
 /// 读取优先级：环境变量 > `~/.config/viva/config.json` > 默认值。
-/// 火山引擎和大模型供应商凭证只存在 Viva 服务端，客户端不保存也不接收。
-struct Config: Codable, Equatable {
+/// **API Key 不写进源码。**
+struct Config: Codable {
 
-    // ── Viva 托管服务 ──
-    /// 生产地址由客户端版本固定/远程配置控制，普通用户不可编辑。
-    static let productionBackendBaseURL = "https://viva.bobdong.cn"
-    static let defaultTestBackendBaseURL = "http://127.0.0.1:8080"
-    static let supportedWordlistIDs = ["ai", "it"]
+    // ── 鉴权 ──
+    /// 新版控制台：单个 `x-api-key` 即可
+    var apiKey: String = ""
+    /// 旧版控制台：App ID + Access Token（填了 apiKey 就不用管这两个）
+    var appKey: String = ""
+    var accessKey: String = ""
 
-    /// 开发者测试模式：ASR WebSocket 与大模型润色同时切到本地项目。
-    var testModeEnabled: Bool = false
-    /// 这是客户端唯一允许编辑的服务地址，而且只在测试模式下生效。
-    var testBackendBaseURL: String = Config.defaultTestBackendBaseURL
+    /// 豆包流式语音识别 2.0 小时版。
+    /// 1.0 是 `volc.bigasr.sauc.duration`（贵 4.5 倍，没理由用）。
+    var resourceId: String = "volc.seedasr.sauc.duration"
+
+    /// 双向流式优化版。只有这个端点支持 enable_nonstream 二遍识别。
+    var endpoint: String = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+
+    // ── 识别参数 ──
+    /// 强制判停时间(ms)。越小上屏越碎越快，越大成句越完整。
+    /// 快嘴模式 300~500 / 默认 800 / 思考模式 1500~3000
+    var endWindowSize: Int = 600
+    /// 音频超过该时长才开始尝试判停，避免刚开口就被切断
+    var forceToSpeechTime: Int = 1000
+    /// 二遍识别：判停后用非流式模型重识别该分句。
+    ///
+    /// ⚠️ **实测（3/3 复现）：开启后热词会失效。**
+    ///   开启：句子更完整、尾字不易丢，但 corpus.context 的热词不生效
+    ///        （"流式"→"流是"、"Claude"→"Cloth"、"上屏"→"尚平"）
+    ///   关闭：热词正常生效，但偶尔会丢句尾（实测丢过"接口"两字）
+    /// 默认关闭 —— 热词是本项目的差异化支点，不能牺牲。
+    var enableNonstream: Bool = false
+    var enablePunc: Bool = true
+    var enableItn: Bool = true
+    /// 语义顺滑，去「嗯」「那个」等口水词
+    var enableDdc: Bool = true
 
     /// 去掉整段末尾的句号。
     ///
@@ -96,14 +59,30 @@ struct Config: Codable, Equatable {
     /// 实现见 TextPolish.stripTrailingPeriod（逐句上屏时用「扣下-补回」策略，
     /// 绝不退格回改）。
     var stripTrailingPeriod: Bool = true
-    /// 启用的本地预设替换规则 id（见 WordlistStore.knownIds）。
-    var enabledWordlists: [String] = Config.supportedWordlistIDs
-    /// 确定性替换规则（改词记忆），在识别文本返回后仅在本机应用。
+    /// 热词直传，双向流式限 100 tokens
+    var hotwords: [String] = []
+    /// 启用的预设词库 id（见 WordlistStore.knownIds）。默认启用 AI + 编程库 ——
+    /// 本产品的目标人群就是开发者，且词库页一眼可关；「互联网职场」库默认关。
+    /// 用户词永远排在预设词前面。选词与容量权衡见 10-预设词库方案.md。
+    var enabledWordlists: [String] = ["ai", "it"]
+    /// 确定性替换规则（改词记忆）。definite/partial 都过一遍，热词纠不动的靠它。
     var replaceRules: [ReplaceRule] = []
+
+    /// 中文输出变体：""=简体（默认）/ traditional=繁体 / tw=台湾正体 / hk=香港繁体
+    var zhVariant: String = ""
+    /// 极速模式：enable_accelerate_text，首字更快但首字准确率下降。
+    /// UI 上必须讲清代价，默认关。
+    var accelerateFirstChar: Bool = false
 
     /// 全局快捷键 ⌃⌥⌘V：把上一段识别结果粘贴到当前光标处。
     /// Secure Input / 注入失败 / 手滑清空时的唯一兜底。
     var pasteLastHotkeyEnabled: Bool = true
+
+    /// 对话上下文：把最近几条识别结果随首包传给豆包（corpus.context 的
+    /// dialog_ctx 用法，限 800 tokens/20 轮），显著提升上下文连贯的识别准确率。
+    /// 隐私：只发**最近的识别文本** —— 这些文本本来就是这家服务识别出来的，
+    /// 不产生新的数据暴露面；App 名等额外信息一概不发。
+    var enableDialogContext: Bool = true
 
     /// 按 App 自动切换的配置覆盖。会话开始时按目标 App 的 bundleId 查表，
     /// 命中的字段覆盖全局配置（快照语义，只影响本次会话）。
@@ -140,8 +119,8 @@ struct Config: Codable, Equatable {
     var commitOnlyAtEnd: Bool = false
 
     // ── 连续听写（方案见 09-连续听写技术方案.md） ──
-    /// 稳定前缀逐段上屏：连续说话不留停顿时，服务端可能一直不返回 definite，
-    /// 文字会全部憋到松手。开启后把 partial 里
+    /// 稳定前缀逐段上屏：连续说话不留停顿时，服务端永远不判停（判停唯一依据是
+    /// 静音 ≥ endWindowSize），文字会全部憋到松手。开启后把 partial 里
     /// 「以标点收尾、连续多帧未变、距尾部有安全边距」的前缀提前写进光标处。
     /// ⚠️ 润色开启时自动失效 —— 润色要拿全文重写，与逐段上屏互斥。
     var progressiveCommit: Bool = true
@@ -156,35 +135,59 @@ struct Config: Codable, Equatable {
     /// 一直没有 definite 时强制轮转的上限秒数（T3），应大于 rotateAfterSeconds
     var hardRotateSeconds: Int = 75
 
-    // ── 服务端大模型处理 ──
+    // ── LLM 润色 ──
 
     var enablePolish: Bool = false
 
     /// 改口自动纠正（对标 Typeless）：「明天九点,啊不对,下午三点」→ 只上屏
-    /// 「明天下午三点」。与润色共用服务端模型，可独立开关；
+    /// 「明天下午三点」。与润色**共用**同一套大模型凭证/模型配置,可独立开关;
     /// 开启后与润色一样推迟到松手整段上屏（改口必须拿到全文才能改）。
     var enableCourseCorrection: Bool = false
 
-    /// 对外统一成一个四态模式；底层保留两个布尔字段，旧配置和按 App 覆盖无需迁移。
-    var aiProcessingMode: AIProcessingMode {
-        get {
-            switch (enablePolish, enableCourseCorrection) {
-            case (false, false): return .off
-            case (false, true): return .correction
-            case (true, false): return .polish
-            case (true, true): return .both
-            }
-        }
-        set {
-            enablePolish = newValue == .polish || newValue == .both
-            enableCourseCorrection = newValue == .correction || newValue == .both
-        }
-    }
+    /// 厂商预设 id，见 LLMProvider.all
+    ///
+    /// 默认指向自家中转站：它是唯一「填一个 Key 就能用」的选项，其余每一家都要求
+    /// 注册 → 实名 → 充值 → 开通模型 → 再抄一个大小写敏感的模型名。
+    /// ⚠️ 因为默认值指向的是本项目作者运营的收费服务，「数据与隐私」那一节必须
+    ///    把润色文本会经过中转站这件事写在明面上（见 SettingsView 数据与隐私）。
+    ///    默认值可以有倾向，但不能是暗桩。
+    /// 注意这只影响**全新安装**：老用户配置里已存了 polishProvider，不会被改写。
+    var polishProvider: String = LLMProvider.relayID
+    /// 仅 provider == "custom" 时生效：关闭深度思考的参数写法
+    var polishThinkingOff: String = "none"
+
+    /// OpenAI 兼容的端点前缀（不含具体路径）。必须与 polishProvider 的默认值配套 ——
+    /// 两者对不上会让新用户一上来就撞 404。
+    var polishBaseURL: String = "https://bobdong.cn/v1"
+
+    /// 接口协议格式。各家的请求体、响应结构、鉴权头都不一样，猜错就是 400/404，
+    /// 所以做成显式选项而不是自动嗅探。见 APIFormat。
+    var polishAPIFormat: String = "openai-chat"
+
+    /// 是否关闭深度思考。默认关 —— 润色一两句话不需要推理，
+    /// 开着会让延迟从 1 秒涨到几秒，思维链还按输出 token 计费。
+    var polishDisableThinking: Bool = true
+
+    /// 端点路径。绝大多数 OpenAI 兼容服务是 /chat/completions；
+    /// 火山方舟另有 /responses（Responses API），部分自建网关会用别的路径。
+    var polishPath: String = "/chat/completions"
 
     /// 是否用流式（SSE）。开启后润色结果会在悬浮条里逐字出现，
     /// 而不是等整段返回 —— 长句子体感差别明显。
     var polishStream: Bool = true
+    var polishApiKey: String = ""
+    /// 方舟填「推理接入点 ID」（ep-xxxx）或模型名；其它服务填模型名
+    var polishModel: String = ""
+    /// 留空则用 LLMPolisher.defaultPrompt
+    var polishPrompt: String = ""
 
+    /// 润色时是否把「当前前台 App 的名字」一并发给服务商，让它按场景调整风格
+    /// （在终端里和在微信里，同一句话该润成不同样子）。
+    ///
+    /// ⚠️ 默认关。开了等于每说一句就告诉服务商「此人此刻在用哪个 App」——
+    ///   1Password、Signal、某个内部工具都会被记上一笔。这是识别文本之外的
+    ///   额外数据，隐私说明里没承诺过，必须由用户显式打开。
+    var sendAppContext: Bool = false
     var polishTimeoutMs: Int = 5000
 
     /// 是否已经走过欢迎/配置引导。首次启动展示欢迎页，之后直接进主界面。
@@ -197,7 +200,7 @@ struct Config: Codable, Equatable {
     // MARK: - 容错解码
     //
     // ⚠️ 这段不能删。用合成的 Codable 时，只要新版本加了一个字段，
-    // 旧的 config.json 就会整份解码失败 → 悄悄退回默认值 → 用户设置「凭空消失」。
+    // 旧的 config.json 就会整份解码失败 → 悄悄退回默认值 → 用户的 API Key「凭空消失」。
     // 逐字段 decodeIfPresent 之后，缺字段用默认值、多余字段直接忽略，升级降级都不会丢配置。
 
     init() {}
@@ -209,12 +212,25 @@ struct Config: Codable, Equatable {
         func b(_ k: CodingKeys, _ d: Bool) -> Bool { (try? c.decodeIfPresent(Bool.self, forKey: k)).flatMap { $0 } ?? d }
 
         let def = Config()
-        testModeEnabled = b(.testModeEnabled, def.testModeEnabled)
-        testBackendBaseURL = s(.testBackendBaseURL, def.testBackendBaseURL)
+        apiKey = s(.apiKey, def.apiKey)
+        appKey = s(.appKey, def.appKey)
+        accessKey = s(.accessKey, def.accessKey)
+        resourceId = s(.resourceId, def.resourceId)
+        endpoint = s(.endpoint, def.endpoint)
+        endWindowSize = i(.endWindowSize, def.endWindowSize)
+        forceToSpeechTime = i(.forceToSpeechTime, def.forceToSpeechTime)
+        enableNonstream = b(.enableNonstream, def.enableNonstream)
+        enablePunc = b(.enablePunc, def.enablePunc)
+        enableItn = b(.enableItn, def.enableItn)
+        enableDdc = b(.enableDdc, def.enableDdc)
         stripTrailingPeriod = b(.stripTrailingPeriod, def.stripTrailingPeriod)
+        hotwords = (try? c.decodeIfPresent([String].self, forKey: .hotwords)).flatMap { $0 } ?? def.hotwords
         enabledWordlists = (try? c.decodeIfPresent([String].self, forKey: .enabledWordlists)).flatMap { $0 } ?? def.enabledWordlists
         replaceRules = (try? c.decodeIfPresent([ReplaceRule].self, forKey: .replaceRules)).flatMap { $0 } ?? def.replaceRules
+        zhVariant = s(.zhVariant, def.zhVariant)
+        accelerateFirstChar = b(.accelerateFirstChar, def.accelerateFirstChar)
         pasteLastHotkeyEnabled = b(.pasteLastHotkeyEnabled, def.pasteLastHotkeyEnabled)
+        enableDialogContext = b(.enableDialogContext, def.enableDialogContext)
         appProfiles = (try? c.decodeIfPresent([AppProfile].self, forKey: .appProfiles)).flatMap { $0 } ?? def.appProfiles
         hotkeyKeyCode = (try? c.decodeIfPresent(Int64.self, forKey: .hotkeyKeyCode)).flatMap { $0 } ?? def.hotkeyKeyCode
         hotkeyIsModifierOnly = b(.hotkeyIsModifierOnly, def.hotkeyIsModifierOnly)
@@ -233,11 +249,23 @@ struct Config: Codable, Equatable {
         hardRotateSeconds = i(.hardRotateSeconds, def.hardRotateSeconds)
         enablePolish = b(.enablePolish, def.enablePolish)
         enableCourseCorrection = b(.enableCourseCorrection, def.enableCourseCorrection)
+        polishProvider = s(.polishProvider, def.polishProvider)
+        polishThinkingOff = s(.polishThinkingOff, def.polishThinkingOff)
+        polishBaseURL = s(.polishBaseURL, def.polishBaseURL)
+        polishAPIFormat = s(.polishAPIFormat, def.polishAPIFormat)
+        polishDisableThinking = b(.polishDisableThinking, def.polishDisableThinking)
+        polishPath = s(.polishPath, def.polishPath)
         polishStream = b(.polishStream, def.polishStream)
+        polishApiKey = s(.polishApiKey, def.polishApiKey)
+        polishModel = s(.polishModel, def.polishModel)
+        polishPrompt = s(.polishPrompt, def.polishPrompt)
+        sendAppContext = b(.sendAppContext, def.sendAppContext)
         polishTimeoutMs = i(.polishTimeoutMs, def.polishTimeoutMs)
         hasSeenWelcome = b(.hasSeenWelcome, def.hasSeenWelcome)
         autoUpdate = b(.autoUpdate, def.autoUpdate)
     }
+
+    var apiFormat: APIFormat { APIFormat(rawValue: polishAPIFormat) ?? .openAIChat }
 
     /// 按目标 App 的 Profile 生成本次会话的有效配置。
     /// 没配 Profile 或字段为 nil（跟随全局）时原样返回。
@@ -246,99 +274,26 @@ struct Config: Codable, Equatable {
               let p = appProfiles.first(where: { $0.bundleId == bid }) else { return self }
         var c = self
         if let v = p.enablePolish { c.enablePolish = v }
-        if let v = p.enableCourseCorrection { c.enableCourseCorrection = v }
         if let v = p.useClipboardPaste { c.useClipboardPaste = v }
         if let v = p.progressiveCommit { c.progressiveCommit = v }
         return c
     }
 
-    var selectedBackendBaseURLString: String {
-        testModeEnabled ? testBackendBaseURL : Self.productionBackendBaseURL
+    var polishReady: Bool {
+        enablePolish && !polishModel.isEmpty
+            && (!polishApiKey.isEmpty || apiFormat == .ollamaNative)
     }
 
-    /// 当前真正生效的服务根地址。只接受 http/https，拒绝 userinfo/query/fragment，
-    /// 避免把令牌或路径意外发到一个看似合法、实际被拼接过的地址。
-    var backendBaseURL: URL? {
-        guard let url = Self.normalizedBackendBaseURL(selectedBackendBaseURLString) else {
-            return nil
-        }
-        // 测试模式是本机开发逃生口，不是给普通用户重新开放任意上游代理。
-        // 即使远端使用 HTTPS，也只允许 loopback；生产地址则始终来自编译期常量。
-        if testModeEnabled,
-           let host = URLComponents(url: url, resolvingAgainstBaseURL: false)?.host,
-           !Self.isLoopbackHost(host) {
-            return nil
-        }
-        return url
+    /// 大模型凭证是否已配好（与开了哪个功能无关）
+    var llmCredentialsReady: Bool {
+        !polishModel.isEmpty && (!polishApiKey.isEmpty || apiFormat == .ollamaNative)
     }
-
-    var hasValidBackendConfiguration: Bool { backendBaseURL != nil }
-
-    var backendConfigurationError: String? {
-        guard testModeEnabled, backendBaseURL == nil else { return nil }
-        return "请输入不带路径的本机服务 origin，例如 http://127.0.0.1:8080；仅允许 localhost、127.0.0.0/8 或 ::1"
-    }
-
-    func polishEndpointURL(streaming: Bool) -> URL? {
-        serviceURL(path: streaming ? "/v1/text/polish/stream" : "/v1/text/polish")
-    }
-
-    func serviceURL(path: String, webSocket: Bool = false) -> URL? {
-        guard let base = backendBaseURL,
-              var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)
-        else { return nil }
-        let prefix = comps.path.split(separator: "/").map(String.init)
-        let suffix = path.split(separator: "/").map(String.init)
-        comps.path = "/" + (prefix + suffix).joined(separator: "/")
-        comps.query = nil
-        comps.fragment = nil
-        if webSocket {
-            comps.scheme = comps.scheme?.lowercased() == "http" ? "ws" : "wss"
-        }
-        return comps.url
-    }
-
-    private static func normalizedBackendBaseURL(_ raw: String) -> URL? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              var comps = URLComponents(string: trimmed),
-              let scheme = comps.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              let host = comps.host, !host.isEmpty,
-              comps.user == nil, comps.password == nil,
-              comps.query == nil, comps.fragment == nil,
-              comps.path.isEmpty || comps.path == "/",
-              scheme == "https" || isLoopbackHost(host)
-        else { return nil }
-        comps.scheme = scheme
-        comps.path = ""
-        return comps.url
-    }
-
-    private static func isLoopbackHost(_ host: String) -> Bool {
-        let value = host.lowercased()
-        if value == "localhost" || value == "::1" { return true }
-        let parts = value.split(separator: ".")
-        guard parts.count == 4,
-              parts.allSatisfy({ part in
-                  guard !part.isEmpty, part.allSatisfy(\.isNumber), let octet = Int(part) else {
-                      return false
-                  }
-                  return (0...255).contains(octet)
-              }) else { return false }
-        return parts[0] == "127"
-    }
-
-    var polishReady: Bool { enablePolish && hasValidBackendConfiguration }
-
-    /// 服务端大模型是否可调用（与开了哪个功能无关）。供应商、模型和 Key 均由服务端管理。
-    var managedLLMReady: Bool { hasValidBackendConfiguration }
 
     /// 松手后是否要走一遍大模型（润色或改口纠正,共用凭证）。
     /// ⚠️ VoiceSession 的推迟上屏判据和 LLMPolisher.isConfigured 都必须用它,
     ///   两边不一致会出现「白等一次再报错」（见 LLMPolisher.isConfigured 注释）。
     var llmPassReady: Bool {
-        (enablePolish || enableCourseCorrection) && managedLLMReady
+        (enablePolish || enableCourseCorrection) && llmCredentialsReady
     }
 
     // MARK: - 加载
@@ -349,17 +304,15 @@ struct Config: Codable, Equatable {
 
     /// 按类别分开存放，别再全平铺在一个目录里 —— 否则「清空配置」会误伤历史/日志/证书。
     ///   config.json  配置（顶层，唯一；重置/备份的最小单位就是它）
-    ///   auth/        当前设备登录会话（仅当前 macOS 用户可读）
     ///   data/        数据：history.json（识别历史）
     ///   logs/        日志：viva.log（+ viva.previous.log）
     ///   crashes/     崩溃报告（CrashReporter 管）
     ///   signing/     代码签名证书备份（make-signing-cert.sh 管，勿删/勿入库）
     static let dataDir = configDir.appendingPathComponent("data", isDirectory: true)
-    static let authDir = configDir.appendingPathComponent("auth", isDirectory: true)
     static let logsDir = configDir.appendingPathComponent("logs", isDirectory: true)
 
     /// 历代旧目录，按从新到旧的顺序找。
-    /// 改目录必须配迁移 —— 否则用户设置和全部识别记录会「凭空消失」，
+    /// 改目录必须配迁移 —— 否则用户的 API Key 和全部识别记录会「凭空消失」，
     /// 而且 load() 里是 try? 吞错误，连报错都看不到。
     private static let legacyDirs = ["justsay", "typespeed", "shengbi", "doubao-voice"].map {
         FileManager.default.homeDirectoryForCurrentUser
@@ -395,13 +348,13 @@ struct Config: Codable, Equatable {
         Log.info("已迁移：\(migrated.joined(separator: ", "))")
 
         // ⚠️ 迁移完必须清掉旧目录。本项目连续改过 4 次名，如果每次都「复制不删除」，
-        //   历史版本里保存过的供应商凭证会留下多份散落副本。
+        //   用户的 API Key 就会留下 4 份散落的副本 —— 凭证副本越多风险越大。
         //   只在确认新目录已经写好之后才删，避免迁移失败反而丢数据。
         guard fm.fileExists(atPath: configURL.path) else { return }
         for dir in legacyDirs where fm.fileExists(atPath: dir.path) {
             do {
                 try fm.removeItem(at: dir)
-                Log.info("已清理旧配置目录 \(dir.lastPathComponent)（可能含旧供应商凭证）")
+                Log.info("已清理旧配置目录 \(dir.lastPathComponent)（其中含 API Key 副本）")
             } catch {
                 Log.warn("清理旧目录 \(dir.lastPathComponent) 失败：\(error.localizedDescription)")
             }
@@ -450,41 +403,15 @@ struct Config: Codable, Equatable {
         if let data = try? Data(contentsOf: configURL),
            let loaded = try? JSONDecoder().decode(Config.self, from: data) {
             cfg = loaded
-            let invalidWordlistIDs = cfg.enabledWordlists.filter {
-                !Self.supportedWordlistIDs.contains($0)
-            }
-            if !invalidWordlistIDs.isEmpty {
-                cfg.enabledWordlists.removeAll { !Self.supportedWordlistIDs.contains($0) }
-            }
-
-            // 旧版曾把供应商长期凭证和自定义上游写进 config.json。
-            // 用当前 Codable 结构生成允许字段集，原子重写任何含未知
-            // 字段的旧配置。这样既不会在新客户端中编译进旧密钥字段名，
-            // 也能在升级时把旧敏感值从磁盘上清掉。
-            let currentData = try? JSONEncoder().encode(cfg)
-            let currentObject = currentData.flatMap {
-                try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
-            }
-            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let currentObject,
-               (!Set(object.keys).isSubset(of: Set(currentObject.keys))
-                || !invalidWordlistIDs.isEmpty) {
-                do {
-                    try cfg.save()
-                    Log.info("已从本地配置移除旧版字段或失效词库")
-                } catch {
-                    Log.warn("清理旧版配置失败：\(error.localizedDescription)")
-                }
-            }
         }
 
-        // 环境变量只允许打开开发测试模式；生产托管地址不能被本地配置覆盖。
+        // 环境变量覆盖，方便临时测试
         let env = ProcessInfo.processInfo.environment
-        if env["VIVA_TEST_MODE"] == "1" { cfg.testModeEnabled = true }
-        if let v = env["VIVA_TEST_BACKEND_URL"], !v.isEmpty {
-            cfg.testModeEnabled = true
-            cfg.testBackendBaseURL = v
-        }
+        if let v = env["DOUBAO_API_KEY"], !v.isEmpty { cfg.apiKey = v }
+        if let v = env["DOUBAO_APP_KEY"], !v.isEmpty { cfg.appKey = v }
+        if let v = env["DOUBAO_ACCESS_KEY"], !v.isEmpty { cfg.accessKey = v }
+        if let v = env["DOUBAO_RESOURCE_ID"], !v.isEmpty { cfg.resourceId = v }
+        if let v = env["DOUBAO_ENDPOINT"], !v.isEmpty { cfg.endpoint = v }
 
         return cfg
     }
@@ -495,10 +422,31 @@ struct Config: Codable, Equatable {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         // ⚠️ 必须 .atomic。非原子写在写入过程中被打断（强退 / 磁盘满 / 被系统杀）
-        //   会留下截断的 config.json，下次启动解码失败 → 用户设置静默清零。
+        //   会留下截断的 config.json，下次启动解码失败 → API Key 和热词静默清零。
         try enc.encode(self).write(to: Self.configURL, options: .atomic)
-        // 配置里包含隐私偏好和本地服务地址，仍保持仅当前用户可读。
+        // 配置里有密钥，收紧权限
         try? FileManager.default.setAttributes([.posixPermissions: 0o600],
                                                ofItemAtPath: Self.configURL.path)
+    }
+
+    var hasCredentials: Bool {
+        !apiKey.isEmpty || (!appKey.isEmpty && !accessKey.isEmpty)
+    }
+
+    /// 组装 WebSocket 握手需要的鉴权头
+    func authHeaders(requestId: String, connectId: String) -> [String: String] {
+        var h: [String: String] = [
+            "X-Api-Resource-Id": resourceId,
+            "X-Api-Request-Id": requestId,
+            "X-Api-Connect-Id": connectId,
+            "X-Api-Sequence": "-1",
+        ]
+        if !apiKey.isEmpty {
+            h["x-api-key"] = apiKey                 // 新版控制台
+        } else {
+            h["X-Api-App-Key"] = appKey             // 旧版控制台
+            h["X-Api-Access-Key"] = accessKey
+        }
+        return h
     }
 }

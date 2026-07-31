@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// 一次识别会话的结果回调
 struct ASRUpdate {
@@ -10,17 +11,32 @@ struct ASRUpdate {
     var fullText: String = ""
 }
 
-/// 豆包流式语音识别 WebSocket 客户端。
+/// Viva 托管语音识别 WebSocket 客户端。
+/// 客户端继续使用现有 SAUC 二进制帧，但只连接 Viva Gateway；火山地址和长期凭证
+/// 由服务端 allowlist 与密钥系统管理，永远不会从这里透传。
 final class DoubaoStreamingASR: NSObject {
 
     enum State { case idle, connecting, streaming, finalizing, closed }
 
     private let config: Config
-    /// 对话上下文：最近几条识别结果，随首包传给服务端（dialog_ctx）。
-    /// 由 VoiceSession 在建会话前设置；--selftest 用 VIVA_TEST_CTX=1 验证协议。
-    var dialogContext: [String] = []
     private var task: URLSessionWebSocketTask?
     private var session: URLSession?
+    private var authTask: Task<Void, Never>?
+    private struct OutboundFrame {
+        let data: Data
+        let context: String
+        let startsFinalTimer: Bool
+    }
+    /// 申请一次性 ASR ticket 尚未结束时先缓存音频，避免热键路径丢掉开头。
+    private var pendingFrames: [OutboundFrame] = []
+    /// URLSessionWebSocketTask 的 send 不能并发调用；所有二进制帧严格串行。
+    private var outboundFrames: [OutboundFrame] = []
+    private var sendInFlight = false
+    /// Full request 可以立即发送；音频必须等 Gateway 确认上游就绪后再按序刷出，
+    /// 避免客户端长时间鉴权缓存与 Gateway 256KiB 缓冲叠加后溢出。
+    private var upstreamReady = false
+    /// 发给语音供应商的不可逆伪标识；真实 Viva device ID 只保留在鉴权 Header。
+    private var managedProviderUID = "viva_anonymous_device"
 
     private(set) var state: State = .idle
     private(set) var logId: String = ""
@@ -35,13 +51,15 @@ final class DoubaoStreamingASR: NSObject {
     private var lastPartial = ""
     private var audioPacketCount = 0
     private var didSendLastPacket = false
+    private var didSendFullRequest = false
 
     var onUpdate: ((ASRUpdate) -> Void)?
     var onError: ((String) -> Void)?
-    /// 流真正结束（收到帧头 flags 标记的 final 帧，或超时兜底）
+    /// 流真正结束（收到帧头 flags 标记的 final 帧，或服务端正常关闭）
     var onFinished: ((String) -> Void)?
 
     private var finalTimer: Timer?
+    private var readinessTimer: Timer?
     private var didFinish = false
 
     init(config: Config) {
@@ -55,15 +73,39 @@ final class DoubaoStreamingASR: NSObject {
         guard state == .idle else { return }
         state = .connecting
 
-        guard let url = URL(string: config.endpoint) else {
-            fail("端点 URL 非法：\(config.endpoint)"); return
+        guard let baseURL = config.backendBaseURL else {
+            fail(config.backendConfigurationError ?? "Viva 服务地址无效"); return
         }
 
+        Log.debug("开始申请 Viva ASR 一次性 ticket")
+        authTask = Task { [weak self] in
+            do {
+                async let deviceID = ManagedBackendAuth.shared.stableDeviceID()
+                async let ticket = ManagedBackendAuth.shared.createASRTicket(baseURL: baseURL)
+                let (stableDeviceID, issuedTicket) = try await (deviceID, ticket)
+                guard let url = Self.webSocketURL(ticket: issuedTicket, baseURL: baseURL) else {
+                    throw ManagedBackendAuth.AuthError.invalidResponse
+                }
+                guard let owner = self else { return }
+                await MainActor.run { [owner] in
+                    guard owner.state == .connecting || owner.state == .finalizing else { return }
+                    owner.managedProviderUID = Self.providerUID(for: stableDeviceID)
+                    owner.openSocket(url: url)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                guard let owner = self else { return }
+                await MainActor.run { [owner] in
+                    owner.fail("连接 Viva 服务失败：\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func openSocket(url: URL) {
         var req = URLRequest(url: url)
         req.timeoutInterval = 15
-        let headers = config.authHeaders(requestId: UUID().uuidString,
-                                         connectId: UUID().uuidString)
-        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue("viva.sauc.v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
 
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 20
@@ -84,8 +126,11 @@ final class DoubaoStreamingASR: NSObject {
         task = t
         t.resume()
 
-        sendFullClientRequest()
         receiveLoop()
+        readinessTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
+            guard let self, !self.didFinish, !self.upstreamReady else { return }
+            self.fail("Viva 语音服务上游连接超时，请重试")
+        }
     }
 
     /// 送一包音频（16k / 16bit / 单声道 PCM）
@@ -93,11 +138,7 @@ final class DoubaoStreamingASR: NSObject {
         guard state == .streaming || state == .connecting else { return }
         audioPacketCount += 1
         let frame = Sauc.audioRequest(pcm: audio, isLast: false)
-        task?.send(.data(frame)) { [weak self] err in
-            if let err {
-                Task { @MainActor in self?.failOrDiagnose(err, context: "发送音频失败") }
-            }
-        }
+        sendOrQueue(frame, context: "发送音频失败")
     }
 
     /// 说完了：发末包，然后等最终结果（带超时兜底）
@@ -108,18 +149,22 @@ final class DoubaoStreamingASR: NSObject {
 
         // 末包允许为空，但如果一包音频都没发过，服务端会回 45000002 空音频
         let frame = Sauc.audioRequest(pcm: Data(), isLast: true)
-        task?.send(.data(frame)) { _ in }
+        sendOrQueue(frame, context: "发送末包失败", startsFinalTimer: true)
+    }
 
-        // openless 用 12s，这里给 6s —— 语音输入场景等太久用户会以为卡死
-        finalTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
+    private func scheduleFinalTimerIfNeeded() {
+        guard task != nil, upstreamReady, finalTimer == nil else { return }
+        // 从“末包实际刷出”开始计时。Gateway 契约允许上游 final 最长约 8 秒，
+        // 留 1 秒调度余量，避免正常慢尾包被客户端过早截断。
+        finalTimer = Timer.scheduledTimer(withTimeInterval: 9.0, repeats: false) { [weak self] _ in
             guard let self, !self.didFinish else { return }
             // 从没连上过 → 不是「没听清」，是网络/代理问题，必须如实报
             guard self.didConnect else {
-                self.fail("连接始终没有建立。本地代理（Clash / AdGuard 等）或 DNS 可能拦截了 WebSocket 握手，试试关闭代理或把 openspeech.bytedance.com 加入直连")
+                self.fail("Viva 语音连接始终没有建立。请检查网络、代理，或确认测试模式下的本地服务已启动")
                 return
             }
-            Log.warn("等最终结果超时，用已有 partial 兜底")
-            self.finishUp(self.lastPartial)
+            Log.warn("等最终结果超时，丢弃未确认 partial")
+            self.fail("等待最终识别结果超时，请重试")
         }
     }
 
@@ -128,7 +173,11 @@ final class DoubaoStreamingASR: NSObject {
         //    仍会走 finishUp → onFinished → 文本照样被粘贴进光标处。
         didFinish = true
         finalTimer?.invalidate(); finalTimer = nil
+        readinessTimer?.invalidate(); readinessTimer = nil
         state = .closed
+        authTask?.cancel(); authTask = nil
+        pendingFrames.removeAll()
+        outboundFrames.removeAll()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session?.invalidateAndCancel()
@@ -138,51 +187,17 @@ final class DoubaoStreamingASR: NSObject {
     // MARK: - 发首包
 
     private func sendFullClientRequest() {
-        var request: [String: Any] = [
+        guard !didSendFullRequest else { return }
+        didSendFullRequest = true
+
+        let request: [String: Any] = [
             "model_name": "bigmodel",
-            "enable_nonstream": config.enableNonstream,
             "show_utterances": true,          // 必开，否则拿不到 definite
             "result_type": "full",            // 全量返回 + 游标计数，比 single 更好对齐
-            "end_window_size": config.endWindowSize,
-            "force_to_speech_time": config.forceToSpeechTime,
-            "enable_punc": config.enablePunc,
-            "enable_itn": config.enableItn,
-            "enable_ddc": config.enableDdc,
         ]
 
-        // 繁体输出（traditional/tw/hk），简体不传 —— 少传一个参数少一分风险
-        if !config.zhVariant.isEmpty {
-            request["output_zh_variant"] = config.zhVariant
-        }
-        // 极速模式：首字更快，代价是首字准确率。score 0~20 越大越激进，取中间值
-        if config.accelerateFirstChar {
-            request["enable_accelerate_text"] = true
-            request["accelerate_score"] = 10
-        }
-
-        // corpus.context 一个字段两种用法（热词 / 对话上下文），装进同一个内层 JSON。
-        // 热词直传要求 payload 是 JSON string（内层需要自己序列化）。
-        var contextInner: [String: Any] = [:]
-        if !config.hotwords.isEmpty {
-            contextInner["hotwords"] = config.hotwords.prefix(60).map { ["word": $0] }
-        }
-        if !dialogContext.isEmpty {
-            // 最近几条识别结果作为对话上下文（限 800 tokens/20 轮，超出服务端按
-            // 时间从新到旧截断）。提升跨句连贯的识别准确率。
-            // ⚠️ 实测：context_data 的元素必须是对象（common.ContextData），
-            //   传纯字符串数组会报 55000000 "fail to unmarshal corpusCtx"。
-            contextInner["context_type"] = "dialog_ctx"
-            contextInner["context_data"] = dialogContext.map { ["text": $0] }
-        }
-        if !contextInner.isEmpty,
-           let inner = try? JSONSerialization.data(withJSONObject: contextInner),
-           let s = String(data: inner, encoding: .utf8) {
-            request["corpus"] = ["context": s]
-        }
-
         let payload: [String: Any] = [
-            "user": ["uid": Host.current().localizedName ?? "mac",
-                     "platform": "macOS"],
+            "user": ["uid": managedProviderUID],
             "audio": ["format": "pcm", "codec": "raw",
                       "rate": 16000, "bits": 16, "channel": 1],
             "request": request,
@@ -191,11 +206,9 @@ final class DoubaoStreamingASR: NSObject {
         guard let json = try? JSONSerialization.data(withJSONObject: payload) else {
             fail("首包 JSON 序列化失败"); return
         }
-        task?.send(.data(Sauc.fullClientRequest(json: json))) { [weak self] err in
-            if let err {
-                Task { @MainActor in self?.failOrDiagnose(err, context: "发送首包失败") }
-            }
-        }
+        enqueueOutbound(OutboundFrame(data: Sauc.fullClientRequest(json: json),
+                                      context: "发送首包失败",
+                                      startsFinalTimer: false))
     }
 
     // MARK: - 收包
@@ -205,36 +218,33 @@ final class DoubaoStreamingASR: NSObject {
             guard let self else { return }
             switch result {
             case .failure(let err):
-                // 已经发过末包 → 多半是服务端正常关流，不当错误
-                if self.didSendLastPacket {
-                    if !self.didFinish { self.finishUp(self.lastPartial) }
-                } else if self.state != .closed {
-                    // 从没握手成功 + badServerResponse = 服务端拒绝了握手（非 101）。
-                    if !self.didConnect, (err as? URLError)?.code == .badServerResponse {
-                        self.failOrDiagnose(err, context: "连接被拒")
-                        return
-                    }
-                    // 按错误类型给可自查的提示，而不是笼统一句「连接中断」
-                    let hint: String
-                    if let u = err as? URLError {
-                        switch u.code {
-                        case .cannotFindHost, .dnsLookupFailed:
-                            hint = "（DNS 解析失败，可能被本地代理或 DNS 工具改写）"
-                        case .secureConnectionFailed, .serverCertificateUntrusted:
-                            hint = "（TLS 握手失败，可能有中间人代理）"
-                        case .notConnectedToInternet, .networkConnectionLost:
-                            hint = "（网络已断开）"
-                        case .timedOut:
-                            hint = "（超时，检查代理设置）"
-                        default: hint = ""
-                        }
-                    } else { hint = "" }
-                    self.fail("连接中断：\(err.localizedDescription)\(hint)")
+                guard !self.didFinish, self.state != .closed else { return }
+                // 从没握手成功 + badServerResponse = 服务端拒绝了握手（非 101）。
+                if !self.didConnect, (err as? URLError)?.code == .badServerResponse {
+                    self.failOrDiagnose(err, context: "连接被拒")
+                    return
                 }
+                // 即使已经发过末包，也必须等到 SAUC final；网络断开不能把 partial
+                // 冒充最终文本上屏。
+                let hint: String
+                if let u = err as? URLError {
+                    switch u.code {
+                    case .cannotFindHost, .dnsLookupFailed:
+                        hint = "（DNS 解析失败，可能被本地代理或 DNS 工具改写）"
+                    case .secureConnectionFailed, .serverCertificateUntrusted:
+                        hint = "（TLS 握手失败，可能有中间人代理）"
+                    case .notConnectedToInternet, .networkConnectionLost:
+                        hint = "（网络已断开）"
+                    case .timedOut:
+                        hint = "（超时，检查代理设置）"
+                    default: hint = ""
+                    }
+                } else { hint = "" }
+                self.fail("连接中断，未收到最终识别结果：\(err.localizedDescription)\(hint)")
             case .success(let msg):
                 switch msg {
                 case .data(let d):  self.handle(d)
-                case .string(let s): self.handle(Data(s.utf8))
+                case .string(let s): self.handleGatewayControl(s)
                 @unknown default: break
                 }
                 if self.state != .closed { self.receiveLoop() }
@@ -249,7 +259,7 @@ final class DoubaoStreamingASR: NSObject {
         let msg: Sauc.ServerMessage
         do { msg = try Sauc.parse(raw) }
         catch {
-            Log.warn("帧解析失败：\(error) — 原始前 32 字节：\(raw.prefix(32).hexDump())")
+            Log.warn("语音响应帧解析失败：\(error)（\(raw.count) bytes）")
             return
         }
 
@@ -268,8 +278,8 @@ final class DoubaoStreamingASR: NSObject {
                 Log.info("服务端正常结束会话")
                 if !didFinish { finishUp(lastPartial) }
             } else {
-                fail("服务端错误 \(code)：\(Sauc.describeError(code))" +
-                     (body.isEmpty ? "" : "  \(body)"))
+                Log.warn("上游语音错误 code=\(code) payloadBytes=\(body.utf8.count)")
+                fail("Viva 语音服务暂时不可用（错误码 \(code)）")
             }
             return
         }
@@ -322,12 +332,52 @@ final class DoubaoStreamingASR: NSObject {
         }
     }
 
+    /// Gateway 控制事件与火山 SAUC binary 可以交错到达，绝不能把 JSON text 当二进制帧解析。
+    private func handleGatewayControl(_ raw: String) {
+        guard !didFinish, state != .closed else { return }
+        guard let data = raw.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = object["type"] as? String else {
+            Log.warn("收到无法识别的 Gateway 文本消息（\(raw.utf8.count) bytes）")
+            return
+        }
+        switch type {
+        case "gateway.session.accepted":
+            Log.debug("Viva Gateway 已接受语音会话")
+            // v1 契约要求 accepted 后首个二进制消息必须是严格最小 SAUC full request。
+            sendFullClientRequest()
+        case "gateway.upstream.ready":
+            if let value = object["upstream_log_id"] as? String, !value.isEmpty {
+                logId = value
+            }
+            Log.info("Viva Gateway 上游已就绪" + (logId.isEmpty ? "" : "  logid=\(logId)"))
+            upstreamReady = true
+            readinessTimer?.invalidate(); readinessTimer = nil
+            flushPendingFrames()
+        case "gateway.session.draining":
+            Log.warn("Viva Gateway 正在排空，本次会话完成后将迁移连接")
+        case "gateway.error":
+            let code = object["code"] as? String ?? "GATEWAY_ERROR"
+            let retryable = object["retryable"] as? Bool ?? false
+            Log.warn("Viva Gateway 返回错误 code=\(code) retryable=\(retryable)")
+            fail(retryable
+                 ? "Viva 语音服务暂时不可用（\(code)），请重试"
+                 : "Viva 语音服务无法完成本次请求（\(code)）")
+        default:
+            Log.debug("Gateway 控制事件：\(type)")
+        }
+    }
+
     // MARK: -
 
     private func finishUp(_ trailing: String) {
         guard !didFinish else { return }
         didFinish = true
+        authTask?.cancel(); authTask = nil
+        pendingFrames.removeAll()
+        outboundFrames.removeAll()
         finalTimer?.invalidate(); finalTimer = nil
+        readinessTimer?.invalidate(); readinessTimer = nil
         state = .closed
         onFinished?(trailing)
         task?.cancel(with: .normalClosure, reason: nil)
@@ -336,60 +386,62 @@ final class DoubaoStreamingASR: NSObject {
         session = nil
     }
 
-    /// 统一入口:握手从未成功且是 badServerResponse → 走二次诊断,否则直接 fail。
-    /// send/receive 两条路都可能先撞到这类错误(哪边先收到取决于时序)。
+    /// ticket 握手失败时不探测供应商上游，也不撤销邮箱会话；下一次语音会话
+    /// 会重新申请一次性 ticket。
     private func failOrDiagnose(_ err: Error, context: String) {
         guard state != .closed, !didFinish else { return }
         if !didConnect, (err as? URLError)?.code == .badServerResponse {
-            // send 和 receive 的失败回调可能先后都到,探测只发一次
-            guard !diagnosing else { return }
-            diagnosing = true
-            diagnoseHandshakeRejection(fallback: err)
+            fail("Viva 服务拒绝了语音连接。请重试；测试模式下请确认本地 URL、反向代理和服务进程均已启动")
         } else {
             fail("\(context)：\(err.localizedDescription)")
         }
     }
 
-    private var diagnosing = false
-
-    /// 握手被拒（非 101）时的二次诊断。WebSocket 拒绝响应的状态码和 body
-    /// URLSession 一概不给看,只报一句 badServerResponse —— 这里用同一套鉴权头
-    /// 发一次普通 HTTPS 请求,把服务端的真实拒绝原因拿回来分诊:
-    ///   401 "Invalid X-Api-Key"        → key 本身填错/被删
-    ///   403 "resource not granted"    → key 有效,但没开通流式语音识别 2.0(最高频)
-    /// 探测费用为零(不会建立识别会话),只在失败路径走一次。
-    private func diagnoseHandshakeRejection(fallback err: Error) {
-        guard var comps = URLComponents(string: config.endpoint) else {
-            fail("连接中断：\(err.localizedDescription)"); return
-        }
-        comps.scheme = "https"
-        guard let url = comps.url else {
-            fail("连接中断：\(err.localizedDescription)"); return
-        }
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 6
-        for (k, v) in config.authHeaders(requestId: UUID().uuidString,
-                                         connectId: UUID().uuidString) {
-            req.setValue(v, forHTTPHeaderField: k)
-        }
-        let rid = config.resourceId
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                let logid = (resp as? HTTPURLResponse)?
-                    .value(forHTTPHeaderField: "X-Tt-Logid") ?? ""
-                Log.error("握手被拒诊断：HTTP \(code)  \(body)  [logid=\(logid)]")
-                if code == 403 || body.contains("not granted") {
-                    self.fail("API Key 有效，但还没开通「豆包流式语音识别大模型」（服务未授权）。去火山引擎控制台 → 语音技术 → 豆包流式语音识别，开通模型 2.0 后即可使用（有免费额度）。资源 ID：\(rid)")
-                } else if code == 401 {
-                    self.fail("API Key 无效或已被删除。请在火山引擎控制台重新创建一个 API Key 并填入设置。")
-                } else {
-                    self.fail("服务端拒绝了连接（HTTP \(code)）：\(body.isEmpty ? err.localizedDescription : body)")
-                }
+    private func sendOrQueue(_ frame: Data, context: String,
+                             startsFinalTimer: Bool = false) {
+        let item = OutboundFrame(data: frame, context: context,
+                                 startsFinalTimer: startsFinalTimer)
+        guard task != nil, upstreamReady else {
+            if pendingFrames.count >= 64 {
+                pendingFrames.removeFirst()
+                Log.warn("等待 Viva ASR ticket 时音频缓存已满，丢弃最早一包")
             }
-        }.resume()
+            pendingFrames.append(item)
+            return
+        }
+        enqueueOutbound(item)
+    }
+
+    private func flushPendingFrames() {
+        guard task != nil, upstreamReady, !didFinish else { return }
+        let queued = pendingFrames
+        pendingFrames.removeAll(keepingCapacity: true)
+        for item in queued { enqueueOutbound(item) }
+    }
+
+    private func enqueueOutbound(_ item: OutboundFrame) {
+        guard !didFinish else { return }
+        outboundFrames.append(item)
+        pumpOutboundQueue()
+    }
+
+    private func pumpOutboundQueue() {
+        guard !sendInFlight, let task, !outboundFrames.isEmpty, !didFinish else { return }
+        sendInFlight = true
+        let item = outboundFrames.removeFirst()
+        task.send(.data(item.data)) { [weak self] error in
+            Task { @MainActor in
+                guard let self else { return }
+                self.sendInFlight = false
+                guard !self.didFinish else { return }
+                if let error {
+                    self.failOrDiagnose(error, context: item.context)
+                    return
+                }
+                if item.startsFinalTimer { self.scheduleFinalTimerIfNeeded() }
+                self.pumpOutboundQueue()
+            }
+        }
     }
 
     private func fail(_ message: String) {
@@ -399,7 +451,11 @@ final class DoubaoStreamingASR: NSObject {
         //    onFinished，导致「先报错、再把同一段文字上屏一遍」。
         didFinish = true
         state = .closed
+        authTask?.cancel(); authTask = nil
+        pendingFrames.removeAll()
+        outboundFrames.removeAll()
         finalTimer?.invalidate(); finalTimer = nil
+        readinessTimer?.invalidate(); readinessTimer = nil
         onError?(message)
         task?.cancel(with: .abnormalClosure, reason: nil)
         task = nil
@@ -415,6 +471,10 @@ extension DoubaoStreamingASR: URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession,
                     webSocketTask: URLSessionWebSocketTask,
                     didOpenWithProtocol proto: String?) {
+        guard proto == "viva.sauc.v1" else {
+            fail("Viva 语音服务协议协商失败")
+            return
+        }
         // X-Tt-Logid 是排障唯一线索，必须留下来
         if let http = webSocketTask.response as? HTTPURLResponse {
             didConnect = true
@@ -431,13 +491,59 @@ extension DoubaoStreamingASR: URLSessionWebSocketDelegate {
                     didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
                     reason: Data?) {
         let why = reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-        Log.info("WebSocket 关闭 code=\(closeCode.rawValue) \(why)")
-        if !didFinish, didSendLastPacket { finishUp(lastPartial) }
+        Log.info("WebSocket 关闭 code=\(closeCode.rawValue) reasonBytes=\(why.utf8.count)")
+        guard !didFinish, state != .closed else { return }
+        if closeCode == .normalClosure, !lastPartial.isEmpty {
+            finishUp(lastPartial)
+        } else {
+            fail(closeCode == .normalClosure
+                 ? "语音连接正常结束，但没有返回可用文字"
+                 : "Viva 语音连接异常关闭（\(closeCode.rawValue)），请重试")
+        }
     }
 }
 
-extension Data {
-    func hexDump() -> String {
-        map { String(format: "%02x", $0) }.joined(separator: " ")
+private extension DoubaoStreamingASR {
+    /// 服务端返回的 websocket_url 当前是相对路径；也兼容未来返回同源绝对 URL。
+    /// 无论响应写 http(s) 还是 ws(s)，最终协议都跟随受信任的 Base URL。
+    static func webSocketURL(ticket: ManagedASRTicket, baseURL: URL) -> URL? {
+        guard let resolved = URL(string: ticket.websocketURL, relativeTo: baseURL)?.absoluteURL,
+              var target = URLComponents(url: resolved, resolvingAgainstBaseURL: false),
+              let base = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
+              target.host?.lowercased() == base.host?.lowercased(),
+              target.port == base.port,
+              target.user == nil, target.password == nil,
+              target.fragment == nil
+        else { return nil }
+
+        switch base.scheme?.lowercased() {
+        case "http": target.scheme = "ws"
+        case "https": target.scheme = "wss"
+        default: return nil
+        }
+        return target.url
+    }
+
+    /// 服务端规范：viva_ + base32(SHA256(device_id))[0:26]。
+    static func providerUID(for deviceID: String) -> String {
+        let digest = Array(SHA256.hash(data: Data(deviceID.utf8)))
+        let alphabet = Array("abcdefghijklmnopqrstuvwxyz234567".utf8)
+        var encoded: [UInt8] = []
+        encoded.reserveCapacity(26)
+
+        for bitOffset in stride(from: 0, to: digest.count * 8, by: 5) {
+            var value = 0
+            for bit in 0..<5 {
+                value <<= 1
+                let absolute = bitOffset + bit
+                if absolute < digest.count * 8 {
+                    let byte = digest[absolute / 8]
+                    value |= Int((byte >> UInt8(7 - absolute % 8)) & 1)
+                }
+            }
+            encoded.append(alphabet[value])
+            if encoded.count == 26 { break }
+        }
+        return "viva_" + String(decoding: encoded, as: UTF8.self)
     }
 }

@@ -36,12 +36,21 @@ PASS_PATH="${BACKUP_DIR}/viva-signing.p12.pass"   # p12 传输密码,只存本�
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
-# 幂等:证书已在钥匙串且非强制 → 直接退出
-if [ "$FORCE" -eq 0 ] && security find-certificate -c "$IDENTITY_CN" >/dev/null 2>&1; then
-  echo "✅ 已存在签名证书「$IDENTITY_CN」,无需重建。"
+# 幂等：直接试签才能确认私钥可用。security find-identity 会把未加入系统
+# 信任链的本地自签证书报告为 0 valid，即使 codesign 实际可以正常使用它。
+IDENTITY_PROBE=$(mktemp "${TMPDIR:-/tmp}/viva-signing-probe.XXXXXX")
+trap 'rm -f "$IDENTITY_PROBE"' EXIT
+cp /bin/echo "$IDENTITY_PROBE"
+if [ "$FORCE" -eq 0 ] \
+  && codesign --force --sign "$IDENTITY_CN" --timestamp=none \
+    "$IDENTITY_PROBE" >/dev/null 2>&1; then
+  rm -f "$IDENTITY_PROBE"
+  echo "✅ 已存在签名证书「${IDENTITY_CN}」,无需重建。"
   echo "   (强制重建新证书:$0 --force —— 注意指纹会变,已装 App 的授权失效一次)"
   exit 0
 fi
+rm -f "$IDENTITY_PROBE"
+trap - EXIT
 
 mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
 TMP=$(mktemp -d)
@@ -54,7 +63,7 @@ fi
 
 if [ -f "$P12_PATH" ] && [ -f "$PASS_PATH" ]; then
   # —— 恢复路径:用已有备份导入,保持指纹一致(跨机器迁移就走这条)——
-  echo "▸ 发现备份,恢复证书「$IDENTITY_CN」(保持指纹一致)…"
+  echo "▸ 发现备份,恢复证书「${IDENTITY_CN}」(保持指纹一致)…"
   P12_PW=$(cat "$PASS_PATH")
 elif [ -f "$P12_PATH" ] && [ ! -f "$PASS_PATH" ]; then
   echo "❌ 有 $P12_PATH 但缺密码文件 $PASS_PATH,无法导入。"
@@ -62,7 +71,7 @@ elif [ -f "$P12_PATH" ] && [ ! -f "$PASS_PATH" ]; then
   exit 1
 else
   # —— 全新生成:随机传输密码,只写到仓库外的 .pass ——
-  echo "▸ 生成新的固定自签证书「$IDENTITY_CN」…"
+  echo "▸ 生成新的固定自签证书「${IDENTITY_CN}」…"
   P12_PW=$(openssl rand -hex 16)
   printf '%s' "$P12_PW" > "$PASS_PATH"; chmod 600 "$PASS_PATH"
 
@@ -114,7 +123,7 @@ cp /bin/echo "$TMP/probe"
 if codesign --force --sign "$IDENTITY_CN" --timestamp=none "$TMP/probe" >/dev/null 2>&1; then
   DR=$(codesign -d -r- "$TMP/probe" 2>&1 | grep -o 'certificate leaf = H"[0-9a-f]*"' || true)
   echo
-  echo "✅ 完成。签名身份「$IDENTITY_CN」可用。"
+  echo "✅ 完成。签名身份「${IDENTITY_CN}」可用。"
   echo "   指定要求(DR): ${DR:-未取到,但签名成功}"
   echo "   私钥+密码备份: $BACKUP_DIR/ (viva-signing.p12 与 .pass 两个文件,换机器前一起拷走)"
   echo

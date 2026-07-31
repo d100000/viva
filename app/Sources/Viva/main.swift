@@ -2,22 +2,17 @@ import Foundation
 import AppKit
 import AVFoundation
 
-// MARK: - 自检模式：把一个音频文件当作麦克风推给豆包
+// MARK: - 自检模式：把一个音频文件当作麦克风推给 Viva Gateway
 //
-// 用途：不碰麦克风、不碰辅助功能权限，纯验证「凭证 + 协议 + 参数」是否正确。
+// 用途：不碰麦克风、不碰辅助功能权限，纯验证「自动鉴权 + Gateway + SAUC」是否正确。
 // 这是 M0 阶段该做的第一件事 —— 把协议调试和 App 工程两个风险源分开。
 //
 //   ./Viva --selftest /path/to/audio.wav
 
 func runSelfTest(path: String) -> Never {
     let config = Config.load()
-    guard config.hasCredentials else {
-        print("""
-        ✖ 没有找到 API Key。
-
-          方式一（推荐）：export DOUBAO_API_KEY=你的key
-          方式二：写进 \(Config.configURL.path)
-        """)
+    guard config.hasValidBackendConfiguration else {
+        print("✖ \(config.backendConfigurationError ?? "Viva 服务地址无效")")
         exit(2)
     }
 
@@ -33,27 +28,16 @@ func runSelfTest(path: String) -> Never {
 
     let seconds = Double(pcm.count) / (16000 * 2)
     print("""
-    ── 豆包流式语音识别 自检 ──
+    ── Viva 托管语音识别 自检 ──
     音频      \(url.lastPathComponent)  \(String(format: "%.1f", seconds))s  \(pcm.count) 字节
-    端点      \(config.endpoint)
-    资源      \(config.resourceId)
-    鉴权      \(config.apiKey.isEmpty ? "旧版控制台 AppKey/AccessKey" : "新版控制台 x-api-key ****\(String(config.apiKey.suffix(4)))")
-    参数      end_window_size=\(config.endWindowSize)  nonstream=\(config.enableNonstream)  ddc=\(config.enableDdc)
+    环境      \(config.testModeEnabled ? "本地测试" : "生产托管")
+    服务      \(config.backendBaseURL?.absoluteString ?? "无效")
+    鉴权      邮箱账户 Bearer + 一次性 ASR ticket
+    参数      16kHz / 16bit / mono PCM，服务端托管识别参数
     ─────────────────────────
     """)
 
-    // VIVA_TEST_CTX=1 时附带对话上下文 + 热词 —— 专门验证 dialog_ctx 的协议形状,
-    // 以及它和热词共用 corpus.context 时能否共存(形状错了服务端直接报错)
-    var testConfig = config
-    let testCtx = ProcessInfo.processInfo.environment["VIVA_TEST_CTX"] == "1"
-    if testCtx, testConfig.hotwords.isEmpty {
-        testConfig.hotwords = ["豆包流式语音识别", "上屏"]
-    }
-    let asr = DoubaoStreamingASR(config: testConfig)
-    if testCtx {
-        asr.dialogContext = ["上一句我们聊到豆包流式语音识别的接入方案", "然后讨论了热词直传的 token 上限"]
-        print("    上下文    dialog_ctx 2 条 + 热词 \(testConfig.hotwords.count) 个（VIVA_TEST_CTX=1）")
-    }
+    let asr = DoubaoStreamingASR(config: config)
 
     var done = false
     var committed = ""
@@ -124,6 +108,121 @@ func runSelfTest(path: String) -> Never {
     exit(done && !committed.isEmpty ? 0 : 1)
 }
 
+/// 本地服务端账户链路自检。只在 local/test 返回 dev_code 时可用，且从不打印
+/// OTP、Access Token、Refresh Token 或 ASR ticket。
+func runAccountSelfTest(email: String) -> Never {
+    let config = Config.load()
+    guard let baseURL = config.backendBaseURL else {
+        print("✖ \(config.backendConfigurationError ?? "Viva 服务地址无效")")
+        exit(2)
+    }
+
+    Task.detached {
+        do {
+            let auth = ManagedBackendAuth.shared
+            print("自检 1/7：请求邮箱验证码")
+            let challenge = try await auth.requestOTP(email: email, purpose: .login,
+                                                       baseURL: baseURL)
+            guard let code = challenge.developerCode else {
+                throw ManagedBackendAuth.AuthError.invalidInput(
+                    "当前服务未返回本地开发验证码；该自检不能用于正式环境")
+            }
+            print("自检 2/7：验证并登录账户")
+            _ = try await auth.stableDeviceID()
+            print("自检 2/7：设备标识已就绪")
+            let verification = try await auth.verifyOTP(email: email, code: code,
+                                                         baseURL: baseURL)
+            print("自检 3/7：强制轮换 Token")
+            _ = try await auth.refreshNow(baseURL: baseURL)
+            print("自检 4/7：读取账户与积分")
+            let user = try await auth.me(baseURL: baseURL)
+            let before = try await auth.balance(baseURL: baseURL)
+
+            var polishConfig = config
+            polishConfig.enablePolish = true
+            polishConfig.polishStream = true
+            print("自检 5/7：请求 LLM SSE 润色")
+            let polished = try await LLMPolisher(config: polishConfig)
+                .polish("嗯，这个这个方案可以上线")
+            print("自检 6/7：确认润色后积分")
+            let after = try await auth.balance(baseURL: baseURL)
+
+            print("""
+            ── Viva 账户链路自检 ──
+            环境      \(baseURL.absoluteString)
+            账户      \(user.email ?? "（无邮箱）")
+            结果      \(verification.created ? "注册并登录" : "登录已有账户")
+            刷新      成功（Token 未输出）
+            润色      \(polished.text)
+            积分      \(before.wallet.availablePoints) → \(after.wallet.availablePoints)
+            ──────────────────────
+            """)
+            if ProcessInfo.processInfo.environment["VIVA_SELFTEST_KEEP_SESSION"] != "1" {
+                print("自检 7/7：退出并清理测试会话")
+                try await auth.logout(baseURL: baseURL)
+            }
+            exit(0)
+        } catch {
+            print("✖ 账户链路自检失败：\(error.localizedDescription)")
+            try? await ManagedBackendAuth.shared.logout(baseURL: baseURL)
+            exit(1)
+        }
+    }
+
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 30) {
+        print("✖ 账户链路自检超时")
+        exit(1)
+    }
+    // URLSession on macOS still relies on CFRunLoop sources in this command-line
+    // mode. `dispatchMain()` services GCD but can leave the async data task
+    // suspended after the server has already returned its response.
+    while true {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+}
+
+/// Restores the session created by `--account-selftest` in a fresh process.
+/// This proves persistence without printing any token or touching the user's
+/// real session when `VIVA_SELFTEST_AUTH_DIR` points to an isolated /tmp path.
+func runAccountRestoreSelfTest() -> Never {
+    let config = Config.load()
+    guard let baseURL = config.backendBaseURL else {
+        print("✖ \(config.backendConfigurationError ?? "Viva 服务地址无效")")
+        exit(2)
+    }
+
+    Task.detached {
+        do {
+            let auth = ManagedBackendAuth.shared
+            print("恢复自检 1/2：从本机会话恢复账户")
+            guard let snapshot = try await auth.restore(baseURL: baseURL) else {
+                throw ManagedBackendAuth.AuthError.notLoggedIn
+            }
+            print("""
+            ── Viva 登录恢复自检 ──
+            账户      \(snapshot.user.email ?? "（无邮箱）")
+            积分      \(snapshot.balance.wallet.availablePoints)
+            结果      新进程静默恢复成功（Token 未输出）
+            ──────────────────────
+            """)
+            print("恢复自检 2/2：退出并清理测试会话")
+            try await auth.logout(baseURL: baseURL)
+            exit(0)
+        } catch {
+            print("✖ 登录恢复自检失败：\(error.localizedDescription)")
+            exit(1)
+        }
+    }
+
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20) {
+        print("✖ 登录恢复自检超时")
+        exit(1)
+    }
+    while true {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+}
+
 /// 用 AVAudioFile 读任意音频（wav/m4a/mp3…），统一转成 16kHz 单声道 Int16 PCM
 func loadAsPCM16k(url: URL) throws -> Data {
     let file = try AVAudioFile(forReading: url)
@@ -176,14 +275,16 @@ CrashReporter.install()
 
 if args.contains("--help") || args.contains("-h") {
     print("""
-    豆包流式语音输入
+    Viva 托管语音输入
 
       Viva                     以菜单栏 App 启动
-      Viva --selftest <音频>    不用麦克风，直接把音频文件推给豆包验证协议
+      Viva --account-selftest <邮箱>  本地验证注册、登录、刷新、余额与润色
+      Viva --account-restore-selftest  用隔离目录验证新进程自动恢复登录
+      Viva --selftest <音频>    不用麦克风，直接把音频文件推给 Viva Gateway
       Viva --help
 
     配置文件：\(Config.configURL.path)
-    环境变量：DOUBAO_API_KEY / DOUBAO_RESOURCE_ID / DOUBAO_ENDPOINT / DOUBAO_VERBOSE
+    环境变量：VIVA_TEST_MODE=1 / VIVA_TEST_BACKEND_URL=http://127.0.0.1:8080 / VIVA_SELFTEST_AUTH_DIR=/tmp/... / VIVA_VERBOSE=1
     """)
     exit(0)
 }
@@ -193,6 +294,17 @@ if let i = args.firstIndex(of: "--selftest") {
         print("✖ --selftest 需要一个音频文件路径"); exit(2)
     }
     runSelfTest(path: args[i + 1])
+}
+
+if let i = args.firstIndex(of: "--account-selftest") {
+    guard i + 1 < args.count else {
+        print("✖ --account-selftest 需要一个测试邮箱"); exit(2)
+    }
+    runAccountSelfTest(email: args[i + 1])
+}
+
+if args.contains("--account-restore-selftest") {
+    runAccountRestoreSelfTest()
 }
 
 // main.swift 的顶层代码实际就跑在主线程上，但编译器不知道，

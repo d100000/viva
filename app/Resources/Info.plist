@@ -27,6 +27,6 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>用于把你说的话实时转成文字。音频只发往你自己配置的火山引擎账号，不经过任何第三方服务器。</string>
+	<string>用于把你说的话实时转成文字。音频会加密发送到 Viva 服务，再由服务端转发到语音识别供应商。</string>
 </dict>
 </plist>

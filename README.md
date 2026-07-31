@@ -20,13 +20,15 @@ curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh | bash
 
 按住一个键说话，松开，文字就写进你当前光标所在的任意输入框。识别走**豆包流式语音识别 2.0**，说话时能看到文字在悬浮条里逐字出现，每说完一句自动上屏。
 
-可选接大模型做二次润色（去口水词、修同音错字、补标点）。
+可选开启服务端大模型润色和改口纠正（去口水词、修同音错字、补标点）。
 
-**所有配置都是你自己的**：API Key 存在本机，识别记录和热词也全在本机。**音频**只发往你自己的火山账号，不经过任何第三方服务器。
+客户端不再保存或接收火山引擎与大模型供应商 API Key，也不允许用户修改供应商、模型或上游地址：
 
-> 关于润色的数据流向：只有你主动开启「AI 润色」时才会发生，且只发送识别出的**文本**（不发音频），发往你自己选的那家大模型服务商。**全新安装的默认服务商是下面提到的「Viva 中转站」**，此时文本会经过 `bobdong.cn` 中转 —— **该中转站由本项目作者运营，是本项目的收入来源**。介意的话换任意其它服务商，或者用 Ollama 做完全本地的润色。
->
-> 另有一个默认**关闭**的开关「把当前 App 名一并发给模型」：打开后请求里会额外带上你所在 App 的名字（用于让模型按场景调整语气）。不打开就不会发。
+- 音频加密发送到 Viva 服务，再由服务端转发到受控的语音识别供应商。
+- 只有开启润色或改口纠正时，识别文本才会发送到 Viva 服务；音频不会重复发给大模型。
+- 识别历史、本地改词记忆和产品偏好保存在本机；Access/Refresh Token 与稳定设备 ID 作为一个原子会话保存。正式 Team ID 签名版本使用 macOS Keychain，本地自签版本使用仅当前 macOS 用户可读的受限文件。
+
+> 正式客户端固定连接 `https://viva.bobdong.cn`。开发联调请在设置中开启“测试模式”，连接同一 origin 下同时提供 REST 与 WebSocket 的本地 Viva 服务。
 
 ---
 
@@ -82,7 +84,7 @@ brew install --cask d100000/tap/viva
 ```
 
 升级 `brew upgrade --cask viva`，卸载 `brew uninstall --cask viva`。
-卸载默认**保留** `~/.config/viva/`（里面有你的 API Key 和历史记录），要一起清掉用 `brew uninstall --zap --cask viva`。
+卸载默认**保留** `~/.config/viva/`（历史记录、本地改词记忆与产品偏好），要一起清掉用 `brew uninstall --zap --cask viva`。
 
 ### 方式三：手动下载
 
@@ -133,65 +135,63 @@ curl -fsSL https://raw.githubusercontent.com/d100000/viva/main/install.sh | bash
 brew uninstall --cask viva      # Homebrew；加 --zap 连同 ~/.config/viva 一起清
 # 手动装的：
 rm -rf /Applications/Viva.app
-rm -rf ~/.config/viva           # 可选：配置、API Key、识别历史都在这里面
+rm -rf ~/.config/viva           # 可选：配置、日志和识别历史都在这里面
 ```
 
 ---
 
 ## 快速开始
 
-首次启动会走欢迎引导：填 API Key → 麦克风授权 → 辅助功能授权 → 试一句。
+首次启动先用邮箱验证码注册或登录，新邮箱会自动创建账户，之后完成麦克风和辅助功能授权。用户不需要填写任何供应商 API Key、模型名或服务地址。
 
 > 授权「辅助功能」后**必须重启 App**，热键才生效。
 
-**建议先跑协议自检**（不需要任何权限，能把「协议/凭证」和「App 权限」两个风险源分开）：
+开发者连接本地服务时，先跑账户链路自检，再跑 ASR 自检（都不需要麦克风或辅助功能权限）：
 
 ```bash
-export DOUBAO_API_KEY=你的火山APIKey
 say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的接入方案"
-# 从源码编译的话用 .build/release/Viva，装好的用下面这条
-/Applications/Viva.app/Contents/MacOS/Viva --selftest /tmp/t.aiff
+cd app
+VIVA_TEST_MODE=1 \
+VIVA_TEST_BACKEND_URL=http://127.0.0.1:8080 \
+.build/release/Viva --account-selftest client-test@example.com
+
+VIVA_TEST_MODE=1 \
+VIVA_TEST_BACKEND_URL=http://127.0.0.1:8080 \
+VIVA_SELFTEST_KEEP_SESSION=1 \
+.build/release/Viva --account-selftest client-asr-test@example.com
+
+VIVA_TEST_MODE=1 \
+VIVA_TEST_BACKEND_URL=http://127.0.0.1:8080 \
+.build/release/Viva --selftest /tmp/t.aiff
 ```
 
 详见 [app/README.md](app/README.md)。
 
 ### 可选：开启 AI 润色
 
-润色要调一个大模型，三条路，按「要做几步」排：
+在设置中开启“识别完成后用大模型润色”或“改口自动纠正”即可。模型、Prompt、供应商凭证和路由由 Viva 服务端统一管理，客户端不会出现供应商、模型名、Base URL 或 API Key 输入框。
 
-| 方案 | 要做几步 | 适合谁 |
-|---|---|---|
-| **Ollama 本地** | 装 Ollama → `ollama pull` 一个模型 | 不想联网、不想花钱 |
-| **各家云厂商** | 注册 → 实名 → 充值 → 开通模型 → 建 Key → 查模型名 | 已经有账号的 |
-| **[Viva 中转站](https://bobdong.cn/?from=viva)** | 拿 Key → 填进去 → 点「拉取模型」 | 想最快用上的 |
+测试模式同样只填写一个本地 loopback origin，客户端会固定调用：
 
-配好后在设置 →「大模型润色」里选，或者在主界面直接点「AI 润色」胶囊。
-
-> 中转站由本项目作者运营，是本项目的收入来源，并且**它是全新安装时润色的默认服务商**（排在服务商列表第一位，标着「推荐」）。它不影响语音识别，也不会在你没开启润色时发送任何东西 —— 上面三条路是平等的，换成另外两条 Viva 的功能都完整。
+- `POST /v1/auth/otp/request` 与 `POST /v1/auth/otp/verify`
+- `POST /v1/asr/tickets` 后使用服务端返回的一次性 WebSocket URL
+- `http://…/v1/text/polish`
+- `http://…/v1/text/polish/stream`
 
 ---
 
-## 实测数据（本机 arm64 / macOS 26.5）
+## 托管链路验收
 
-| 指标 | 实测 |
+当前客户端已对本地 Viva Server 完成以下端到端验证：
+
+| 链路 | 验证结果 |
 |---|---|
-| 首字返回 | **586 ~ 936 ms** |
-| 逐句上屏（句间停顿 0.9s） | 2.7s / 7.8s / 11.9s —— 每说完一句就上屏 |
-| 成本 | **约 1 元/小时**（按实际说话时长计费） |
+| 账户 | 邮箱 OTP 注册/登录、`/v1/me`、积分余额 |
+| Token | Bearer Access Token、Refresh Token 轮换、固定幂等键、按签名类型选择安全持久化 |
+| LLM | 产品专用润色 schema、SSE `delta/final/usage/done`、结算后余额同步 |
+| ASR | 一次性 ticket、`viva.sauc.v1`、Gateway accepted/ready、SAUC 音频与 final |
 
-### ⚠️ 两条实测推翻官方说法的结论
-
-**① `end_window_size` 必须小于你说话的自然停顿**，否则「边说边打字」直接退化成「说完才一次性上屏」。测试中设成 1500ms 后，句间停顿 900ms 的三句话全部憋到末尾才吐出来。真人换气通常 0.4–1.0 秒，**300–600ms 是安全区**。
-
-**② `enable_nonstream`（二遍识别）与热词互斥**（3/3 复现）。官方说它「既快又准」，但实测开启后 `corpus.context` 的热词会失效：
-
-| 说的内容 | 开启二遍 | 关闭二遍 |
-|---|---|---|
-| 流**式**语音识别 | 流**是** ❌ | 流**式** ✅ |
-| **Claude** Code | **Cloth** Code ❌ | **Claude** ✅ |
-| **上屏** | **尚平** ❌ | **上屏** ✅ |
-
-本项目默认关闭 —— 热词是核心能力，不能牺牲。
+本地 Fake Volc 只用于协议正确性回归，它的延迟不代表生产供应商延迟。
 
 ---
 
@@ -199,12 +199,12 @@ say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的
 
 - **不占输入法槽** —— 全局热键触发，你可以继续用自己的拼音方案
 - **首字不丢** —— 环形音频预缓冲，热键按下前 400ms 的声音一并送出
-- **可编程热词** —— 直传 `corpus.context`，专有名词识别率的最大杠杆
+- **本地改词记忆** —— 识别结果返回后在本机做确定性替换，不向供应商发送自定义词表
 - **去掉末尾句号** —— 往聊天框/搜索框塞一句话时那个句号是多余的。逐句上屏下用「先扣下、下一句到了再补回」实现，**不做退格回改**；问号感叹号和省略号原样保留
-- **大模型润色** —— 八家服务商预设（Viva 中转站/火山方舟/DeepSeek/百炼/OpenAI/智谱/硅基流动/Ollama）+ 五种协议格式（OpenAI Chat、Responses、Anthropic Messages、Ollama 原生、Gemini）
-- **模型列表自动拉取** —— 填好 Key 点一下，服务端有哪些模型自动列出来（已过滤掉向量/语音/画图这类选了必定调用失败的），轻量档排最前。模型名 churn 太快，写死的预设表迟早过期
+- **托管大模型处理** —— 产品级润色、改口纠正与 SSE 流式反馈；客户端不能发送任意模型、Prompt 或上游地址
+- **账户即服务** —— 邮箱验证码注册/登录、短期 Bearer Access Token、轮换 Refresh Token 与本机持久会话
 - **历史与统计** —— 说话次数/时长/字数、语速、节省时间、连续天数、App 分布、活跃热力图
-- **隐私自持** —— BYOK，零硬编码凭证，配置权限 600，不截屏、不读前台内容
+- **供应商密钥不落客户端** —— 火山与 LLM Key 只存在服务端；本地配置权限 600，不截屏、不读取窗口内容
 
 ---
 
@@ -215,7 +215,7 @@ say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的
 ├── app/                      # macOS App（Swift + SwiftPM，无需 Xcode）
 │   ├── Sources/Viva/         # 26 个源文件，约 8300 行
 │   ├── tools/make_icon.swift # 图标生成器（CoreGraphics 直接画）
-│   ├── build.sh              # 编译 + 组装 .app + 签名（固定自签证书，缺证书才回退 ad-hoc）
+│   ├── build.sh              # 编译 + 组装 .app + 签名（Release 强制固定身份，Debug 才允许 ad-hoc）
 │   ├── make-signing-cert.sh  # 生成/恢复固定自签证书（授权跨更新保留的关键，跑一次即可）
 │   └── package.sh            # 打发布用的 DMG + ZIP
 ├── install.sh                # 终端一键安装脚本
@@ -248,4 +248,5 @@ say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的
 
 - **不是逐字上屏**。中间结果只在悬浮条预览，写进输入框的最小单位是**一句**。真·逐字上屏需要 InputMethodKit 输入法形态，见 [04 章 §6](04-技术实现方案.md)。
 - **绝不做退格回改**。算错一次就会不可逆地删掉用户自己的文字。
+- 正式客户端固定连接 `https://viva.bobdong.cn`，账户、语音识别和大模型请求均从该受信任 origin 派生。
 - macOS 14+，自签证书签名，无公证 —— 下载的包首次打开要过一次 Gatekeeper（见[安装](#安装)），且上不了 App Store（辅助功能与沙盒也不兼容）。签名身份固定，**更新/重编译不会丢「辅助功能」授权**。

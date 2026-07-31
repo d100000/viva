@@ -1,11 +1,17 @@
 import Foundation
 
+enum AIProcessingOutcome: String, Codable, Hashable {
+    case changed
+    case unchanged
+    case fallback
+}
+
 /// 一条识别记录
 struct VoiceRecord: Codable, Identifiable, Hashable {
     var id: UUID = UUID()
     var text: String
     var startedAt: Date
-    /// 说话时长（秒）= 实际推流的音频时长，也是计费口径
+    /// 说话时长（秒）= 实际推流的音频时长，也是服务端用量统计口径
     var durationSec: Double
     /// 首字返回延迟（毫秒）
     var firstCharMs: Int?
@@ -16,9 +22,23 @@ struct VoiceRecord: Codable, Identifiable, Hashable {
     var injected: Bool = true
     /// LLM 润色后的文本。Optional 字段，旧的 history.json 缺这个键也能正常解码。
     var polishedText: String? = nil
+    /// 新记录保留实际使用的 AI 模式和结果；Optional 保证旧历史可以直接读取。
+    var aiMode: AIProcessingMode? = nil
+    var aiOutcome: AIProcessingOutcome? = nil
+    var aiElapsedMs: Int? = nil
 
     /// 最终生效的文本（有润色就用润色后的）
     var finalText: String { polishedText ?? text }
+    /// 旧记录只有 polishedText，按原有语义推断为轻度润色。
+    var effectiveAIMode: AIProcessingMode? {
+        aiMode ?? (polishedText == nil ? nil : .polish)
+    }
+    var effectiveAIOutcome: AIProcessingOutcome? {
+        if let aiOutcome { return aiOutcome }
+        guard let polishedText else { return nil }
+        return polishedText == text ? .unchanged : .changed
+    }
+    var hasDistinctOriginal: Bool { polishedText != nil && finalText != text }
     /// 中文按字符数算；英文按空格分词更合理，这里做混合估算
     var charCount: Int { finalText.count }
 
@@ -43,9 +63,9 @@ struct VoiceStats {
         totalSeconds > 0 ? Double(totalChars) / (totalSeconds / 60) : 0
     }
 
-    /// 节省的时间（分钟）。
-    /// 中文键盘输入速度按 30 字/分钟保守估算（熟练拼音用户 40~60，这里取低值避免虚报）。
-    static let typingCharsPerMinute: Double = 30
+    /// 节省的时间（分钟）。中文键盘输入按 50 字/分钟估算；
+    /// 该值位于常见熟练拼音输入速度区间中部，避免用过低基准夸大收益。
+    static let typingCharsPerMinute: Double = 50
     var savedMinutes: Double {
         let typingMin = Double(totalChars) / Self.typingCharsPerMinute
         return max(0, typingMin - totalSeconds / 60)
@@ -57,8 +77,6 @@ struct VoiceStats {
     }
     var firstCharSamples: [Double] = []
 
-    /// 费用（豆包流式 2.0 后付费 1 元/小时）
-    var cost: Double { totalSeconds / 3600 * 1.0 }
 }
 
 /// 历史记录持久化 + 统计。
@@ -105,7 +123,7 @@ final class HistoryStore: ObservableObject {
         saveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled else { return }
-            await self?.saveNow()
+            self?.saveNow()
         }
     }
 

@@ -1,0 +1,314 @@
+# Local development template. It becomes runnable after the new viva-server repo
+# implements the referenced Dockerfile and test/fake-volc command.
+# Production must use managed PostgreSQL/Valkey, KMS and immutable image digests.
+
+name: viva-server-local
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_DB: viva
+      # Bootstrap superuser is local-only and is never mounted into an app.
+      POSTGRES_USER: viva_bootstrap
+      POSTGRES_PASSWORD: viva-bootstrap-local-only
+      TZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - viva-postgres:/var/lib/postgresql/data
+      - ./postgres-init.local.sql:/docker-entrypoint-initdb.d/00-viva-local-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=viva-migrator-local-only psql -h 127.0.0.1 -U viva_migrator -d viva -tAc 'SELECT 1' | grep -qx 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [viva]
+
+  valkey:
+    image: ${VALKEY_IMAGE:-valkey/valkey:8-alpine}
+    command:
+      - valkey-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "60"
+      - "1"
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - viva-valkey:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [viva]
+
+  mailpit:
+    image: ${MAILPIT_IMAGE:-axllent/mailpit:latest}
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+    networks: [viva]
+
+  minio:
+    # Local convenience only. M0 CI must resolve compatible MinIO/mc versions
+    # and pin immutable image digests before this template is promoted.
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: viva-local
+      MINIO_ROOT_PASSWORD: viva-local-only-password
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - viva-minio:/data
+    networks: [viva]
+
+  minio-init:
+    profiles: [app]
+    image: ${MINIO_MC_IMAGE:-minio/mc:latest}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        until mc alias set local http://minio:9000 viva-local viva-local-only-password;
+        do sleep 1; done &&
+        mc ready local &&
+        mc mb --ignore-existing local/viva-local &&
+        mc anonymous set none local/viva-local
+    depends_on:
+      minio:
+        condition: service_started
+    restart: "no"
+    networks: [viva]
+
+  fake-volc:
+    profiles: [app]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["/app/viva-server", "fake-volc", "--addr=:18080"]
+    environment:
+      VIVA_ENV: local
+      VIVA_LOG_LEVEL: debug
+    ports:
+      - "127.0.0.1:18080:18080"
+    networks: [viva]
+
+  migrate:
+    profiles: [app]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["/app/viva-server", "migrate", "up"]
+    env_file: [../../.env]
+    environment:
+      VIVA_ROLE: migrate
+      VIVA_DATABASE_URL: postgres://viva_migrator:viva-migrator-local-only@postgres:5432/viva?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [viva]
+    restart: "no"
+
+  db-grants:
+    profiles: [app]
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    command:
+      - psql
+      - -h
+      - postgres
+      - -U
+      - viva_migrator
+      - -d
+      - viva
+      - -v
+      - ON_ERROR_STOP=1
+      - -f
+      - /grants/database-grants.sql
+    environment:
+      PGPASSWORD: viva-migrator-local-only
+    volumes:
+      - ./database-grants.sql:/grants/database-grants.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [viva]
+    restart: "no"
+
+  api:
+    profiles: [app]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["/app/viva-server", "api"]
+    env_file: [../../.env]
+    environment:
+      VIVA_ROLE: api
+      VIVA_HTTP_ADDR: :8080
+      VIVA_DATABASE_URL: postgres://viva_api:viva-api-local-only@postgres:5432/viva?sslmode=disable
+      VIVA_REDIS_ADDR: valkey:6379
+      VIVA_OBJECT_STORE_ENDPOINT: http://minio:9000
+      VIVA_JWT_PREVIOUS_PUBLIC_KEYS_DIR: ""
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      db-grants:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 30s
+    secrets:
+      - jwt_signing_key
+      - config_signing_key
+      - refresh_pepper
+      - pii_hmac_pepper
+      - local_pii_kek
+      - volc_ark_credentials
+      - email_provider_credentials
+      - billing_provider_credentials
+      - object_store_credentials
+    networks: [viva]
+
+  gateway:
+    profiles: [app]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["/app/viva-server", "gateway"]
+    env_file: [../../.env]
+    environment:
+      VIVA_ROLE: gateway
+      VIVA_GATEWAY_ADDR: :8081
+      VIVA_DATABASE_URL: postgres://viva_gateway:viva-gateway-local-only@postgres:5432/viva?sslmode=disable
+      VIVA_REDIS_ADDR: valkey:6379
+      VIVA_SHUTDOWN_GRACE: 90s
+      VIVA_JWT_SIGNING_KEY_REF: ""
+      VIVA_JWT_VERIFICATION_JWKS_REF: local-file:/run/secrets/jwt_verification_jwks.json
+      VIVA_JWT_PREVIOUS_PUBLIC_KEYS_DIR: ""
+      VIVA_REFRESH_TOKEN_PEPPER_REF: ""
+      VIVA_PII_HMAC_PEPPER_REF: ""
+      VIVA_PII_KEK_REF: ""
+      VIVA_ASR_UPSTREAM_URL: ws://fake-volc:18080/api/v3/sauc/bigmodel_async
+      VIVA_ASR_SECRET_REF: local-file:/run/secrets/volc_asr_credentials.json
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      fake-volc:
+        condition: service_started
+      db-grants:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 90s
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    secrets:
+      - jwt_verification_jwks
+      - volc_asr_credentials
+    networks: [viva]
+
+  worker:
+    profiles: [app]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["/app/viva-server", "worker"]
+    env_file: [../../.env]
+    environment:
+      VIVA_ROLE: worker
+      VIVA_DATABASE_URL: postgres://viva_worker:viva-worker-local-only@postgres:5432/viva?sslmode=disable
+      VIVA_REDIS_ADDR: valkey:6379
+      VIVA_JWT_SIGNING_KEY_REF: ""
+      VIVA_REFRESH_TOKEN_PEPPER_REF: ""
+      VIVA_EMAIL_PROVIDER: smtp
+      VIVA_EMAIL_SMTP_ADDR: mailpit:1025
+      VIVA_EMAIL_SMTP_TLS_MODE: disabled
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      db-grants:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 30s
+    secrets:
+      - pii_hmac_pepper
+      - local_pii_kek
+      - email_provider_credentials
+      - billing_provider_credentials
+      - object_store_credentials
+    networks: [viva]
+
+networks:
+  viva:
+    driver: bridge
+
+volumes:
+  viva-postgres:
+  viva-valkey:
+  viva-minio:
+
+secrets:
+  jwt_signing_key:
+    file: ../../.local/secrets/jwt_signing_key.pem
+  jwt_verification_jwks:
+    file: ../../.local/secrets/jwt_verification_jwks.json
+  config_signing_key:
+    file: ../../.local/secrets/config_signing_key.pem
+  refresh_pepper:
+    file: ../../.local/secrets/refresh_pepper
+  pii_hmac_pepper:
+    file: ../../.local/secrets/pii_hmac_pepper
+  local_pii_kek:
+    file: ../../.local/secrets/local_pii_kek
+  volc_asr_credentials:
+    file: ../../.local/secrets/volc_asr_credentials.json
+  volc_ark_credentials:
+    file: ../../.local/secrets/volc_ark_credentials.json
+  email_provider_credentials:
+    file: ../../.local/secrets/email_provider_credentials.json
+  billing_provider_credentials:
+    file: ../../.local/secrets/billing_provider_credentials.json
+  object_store_credentials:
+    file: ../../.local/secrets/object_store_credentials.json

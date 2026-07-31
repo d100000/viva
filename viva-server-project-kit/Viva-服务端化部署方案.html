@@ -1,0 +1,1301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Viva 服务端化部署方案｜实时语音 + 大模型托管网关</title>
+  <style>
+    :root {
+      --ink: #142033;
+      --muted: #5f6d7d;
+      --paper: #f5f8fc;
+      --surface: #ffffff;
+      --line: #dce5ef;
+      --blue: #1769d2;
+      --blue-soft: #eaf3ff;
+      --teal: #087f78;
+      --teal-soft: #e5f7f4;
+      --amber: #b65d0c;
+      --amber-soft: #fff3df;
+      --red: #b42318;
+      --red-soft: #fff0ee;
+      --violet: #6c4ed2;
+      --code: #101a2a;
+      --shadow: 0 12px 38px rgba(35, 57, 82, .09);
+      --radius: 16px;
+      --content: 1120px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(23,105,210,.035) 1px, transparent 1px) 0 0 / 28px 28px,
+        linear-gradient(rgba(23,105,210,.035) 1px, transparent 1px) 0 0 / 28px 28px,
+        var(--paper);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.72;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--blue); text-underline-offset: 3px; }
+    a:hover { color: #0d4fa8; }
+    button, input { font: inherit; }
+    :focus-visible { outline: 3px solid rgba(23,105,210,.32); outline-offset: 3px; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      height: 4px;
+      background: #dbe7f5;
+    }
+    .topbar > span {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: linear-gradient(90deg, var(--blue), var(--teal));
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 72px 24px 54px;
+      color: #f9fbff;
+      background:
+        radial-gradient(circle at 82% 18%, rgba(25,185,178,.25), transparent 30%),
+        radial-gradient(circle at 12% 82%, rgba(75,124,255,.22), transparent 28%),
+        #101c2e;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: .2;
+      background-image: linear-gradient(90deg, rgba(255,255,255,.12) 1px, transparent 1px);
+      background-size: 9.09% 100%;
+    }
+    .hero-inner { position: relative; z-index: 1; width: min(var(--content), 100%); margin: 0 auto; }
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 20px;
+      color: #b8d9ff;
+      font: 700 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 28px; height: 2px; background: #42d2c6; }
+    h1 {
+      max-width: 920px;
+      margin: 0;
+      font-size: clamp(38px, 6vw, 76px);
+      line-height: 1.03;
+      letter-spacing: -.055em;
+      font-weight: 850;
+    }
+    .hero-lead {
+      max-width: 800px;
+      margin: 24px 0 30px;
+      color: #cbd7e8;
+      font-size: clamp(17px, 2vw, 22px);
+      line-height: 1.65;
+    }
+    .hero-meta { display: flex; flex-wrap: wrap; gap: 10px; }
+    .hero-meta span {
+      padding: 7px 11px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 999px;
+      color: #dbe9f8;
+      background: rgba(255,255,255,.05);
+      font-size: 13px;
+    }
+
+    .latency-rail {
+      margin-top: 44px;
+      padding: 18px 18px 16px;
+      border: 1px solid rgba(255,255,255,.17);
+      border-radius: 14px;
+      background: rgba(5,14,27,.46);
+      backdrop-filter: blur(12px);
+    }
+    .rail-label { display: flex; justify-content: space-between; gap: 18px; color: #9fb3ca; font-size: 12px; }
+    .rail {
+      display: grid;
+      grid-template-columns: 14fr 18fr 20fr 48fr;
+      gap: 4px;
+      height: 16px;
+      margin: 10px 0 9px;
+    }
+    .rail span { border-radius: 4px; }
+    .rail .r1 { background: #42d2c6; }
+    .rail .r2 { background: #5fa0ff; }
+    .rail .r3 { background: #8b79ff; }
+    .rail .r4 { background: #f3a85d; }
+    .rail-legend { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; color: #d6e1ef; font-size: 12px; }
+    .rail-legend b { display: block; color: white; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .layout {
+      width: min(1380px, calc(100% - 32px));
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 244px minmax(0, var(--content));
+      justify-content: center;
+      gap: 34px;
+      padding: 34px 0 80px;
+    }
+    .toc {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      max-height: calc(100vh - 48px);
+      overflow: auto;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,.9);
+      box-shadow: var(--shadow);
+    }
+    .toc strong { display: block; margin-bottom: 9px; font-size: 13px; letter-spacing: .08em; color: var(--muted); }
+    .toc a { display: block; padding: 5px 8px; border-radius: 8px; color: #39495d; text-decoration: none; font-size: 13px; line-height: 1.42; }
+    .toc a:hover { background: var(--blue-soft); color: var(--blue); }
+
+    main { min-width: 0; }
+    section {
+      scroll-margin-top: 18px;
+      margin-bottom: 26px;
+      padding: clamp(24px, 4vw, 44px);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--surface);
+      box-shadow: 0 8px 26px rgba(35,57,82,.055);
+    }
+    section > :first-child { margin-top: 0; }
+    section > :last-child { margin-bottom: 0; }
+    h2 { margin: 0 0 22px; font-size: clamp(27px, 3.4vw, 42px); line-height: 1.15; letter-spacing: -.035em; }
+    h3 { margin: 30px 0 12px; font-size: 22px; line-height: 1.3; }
+    h4 { margin: 22px 0 8px; font-size: 17px; }
+    p { margin: 10px 0 15px; }
+    ul, ol { padding-left: 1.25em; }
+    li + li { margin-top: 6px; }
+    .section-kicker { margin-bottom: 9px; color: var(--blue); font: 750 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; text-transform: uppercase; }
+    .lede { color: #34465b; font-size: 18px; }
+    .muted { color: var(--muted); }
+    .small { font-size: 13px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    .verdict {
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 18px;
+      margin: 20px 0;
+    }
+    .verdict-main, .verdict-side {
+      padding: 24px;
+      border-radius: 16px;
+    }
+    .verdict-main { color: white; background: linear-gradient(135deg, #1769d2, #0a827a); }
+    .verdict-main h3 { margin-top: 0; font-size: 28px; }
+    .verdict-main p { color: #e4f2ff; }
+    .verdict-side { border: 1px solid #f1d2aa; background: var(--amber-soft); }
+    .verdict-side h3 { margin-top: 0; color: #7d3e08; }
+
+    .grid-2, .grid-3, .grid-4 { display: grid; gap: 15px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card {
+      padding: 19px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fbfdff;
+    }
+    .card h3, .card h4 { margin-top: 0; }
+    .card p:last-child { margin-bottom: 0; }
+    .metric { font-size: 30px; font-weight: 820; line-height: 1.05; letter-spacing: -.04em; color: var(--blue); }
+    .metric-label { margin-top: 5px; color: var(--muted); font-size: 13px; }
+
+    .callout {
+      margin: 18px 0;
+      padding: 16px 18px;
+      border-left: 4px solid var(--blue);
+      border-radius: 0 12px 12px 0;
+      background: var(--blue-soft);
+    }
+    .callout.warn { border-left-color: var(--amber); background: var(--amber-soft); }
+    .callout.danger { border-left-color: var(--red); background: var(--red-soft); }
+    .callout.good { border-left-color: var(--teal); background: var(--teal-soft); }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr 42px 1fr 42px 1fr;
+      align-items: stretch;
+      gap: 8px;
+      margin: 22px 0;
+    }
+    .node {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 122px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #f8fbff;
+    }
+    .node b { display: block; margin-bottom: 5px; color: var(--blue); }
+    .arrow { display: grid; place-items: center; color: var(--teal); font-size: 26px; font-weight: 800; }
+
+    .pipeline {
+      display: flex;
+      gap: 0;
+      overflow-x: auto;
+      padding: 14px 0 6px;
+    }
+    .pipeline .step {
+      position: relative;
+      flex: 1 0 150px;
+      min-height: 116px;
+      padding: 16px 16px 14px;
+      border-top: 3px solid var(--blue);
+      background: #f8fbff;
+    }
+    .pipeline .step + .step { border-left: 1px solid var(--line); }
+    .pipeline .step b { display: block; margin-bottom: 7px; }
+    .pipeline .step small { color: var(--muted); }
+
+    .decision {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+      margin: 16px 0 22px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      font-size: 14px;
+    }
+    .decision th, .decision td { padding: 12px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    .decision th { color: #324358; background: #edf4fb; font-size: 13px; }
+    .decision tr:last-child td { border-bottom: 0; }
+    .decision tbody tr:nth-child(even) td { background: #fbfdff; }
+    .decision .recommended td { background: #eaf8f6 !important; }
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      color: #075d57;
+      background: #d4f1ed;
+      font-size: 12px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .badge.warn { color: #7c3c07; background: #ffe8c4; }
+    .badge.red { color: #8b1c14; background: #ffdcd8; }
+
+    pre {
+      overflow-x: auto;
+      margin: 16px 0;
+      padding: 18px;
+      border-radius: 13px;
+      color: #dbe8fa;
+      background: var(--code);
+      font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      tab-size: 2;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    p code, li code, td code { padding: 2px 5px; border-radius: 5px; color: #1557a3; background: #edf4fb; font-size: .9em; }
+
+    details {
+      margin: 12px 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fbfdff;
+    }
+    summary { cursor: pointer; padding: 14px 16px; font-weight: 720; }
+    details > div { padding: 0 16px 16px; }
+
+    .calculator {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr);
+      gap: 22px;
+      margin-top: 20px;
+    }
+    .form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    label { display: block; color: #3a4a5e; font-size: 13px; font-weight: 680; }
+    input[type="number"] {
+      width: 100%;
+      margin-top: 5px;
+      padding: 10px 11px;
+      border: 1px solid #cdd9e7;
+      border-radius: 9px;
+      color: var(--ink);
+      background: white;
+    }
+    .results {
+      padding: 22px;
+      border-radius: 16px;
+      color: white;
+      background: #13243a;
+    }
+    .results h3 { margin-top: 0; }
+    .result-row { display: flex; justify-content: space-between; gap: 14px; padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,.12); }
+    .result-row:last-of-type { border-bottom: 0; }
+    .result-row span { color: #b8c8da; }
+    .result-total { margin-top: 18px; font-size: 36px; font-weight: 850; letter-spacing: -.04em; }
+    .result-unit { color: #9fb4ca; font-size: 13px; }
+
+    .roadmap { position: relative; margin: 20px 0 0; padding-left: 24px; border-left: 2px solid #bcd0e7; }
+    .phase { position: relative; padding: 0 0 26px 20px; }
+    .phase::before { content: ""; position: absolute; left: -31px; top: 5px; width: 12px; height: 12px; border: 3px solid white; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 2px var(--blue); }
+    .phase h3 { margin: 0 0 5px; }
+    .phase .time { color: var(--teal); font: 700 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .checklist { list-style: none; padding: 0; }
+    .checklist li { position: relative; padding-left: 28px; }
+    .checklist li::before { content: "✓"; position: absolute; left: 0; top: 1px; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--teal); font-size: 12px; font-weight: 800; }
+
+    .sources { columns: 2; column-gap: 34px; }
+    .sources li { break-inside: avoid; margin-bottom: 9px; }
+    footer { width: min(var(--content), calc(100% - 32px)); margin: -48px auto 60px; color: var(--muted); font-size: 13px; text-align: center; }
+
+    .print-btn {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 18;
+      padding: 11px 15px;
+      border: 1px solid #bfd0e3;
+      border-radius: 999px;
+      color: #17314f;
+      background: rgba(255,255,255,.94);
+      box-shadow: var(--shadow);
+      cursor: pointer;
+    }
+
+    @media (max-width: 1050px) {
+      .layout { grid-template-columns: 1fr; width: min(var(--content), calc(100% - 28px)); }
+      .toc { position: relative; top: auto; max-height: none; columns: 2; }
+      .toc strong { column-span: all; }
+      .verdict, .calculator { grid-template-columns: 1fr; }
+      .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 720px) {
+      .hero { padding: 52px 20px 42px; }
+      .hero::after { display: none; }
+      .rail-legend { grid-template-columns: repeat(2, 1fr); }
+      section { padding: 24px 18px; border-radius: 16px; }
+      .toc { columns: 1; }
+      .grid-2, .grid-3, .grid-4, .form-grid { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); min-height: 30px; }
+      .sources { columns: 1; }
+      .decision { display: block; overflow-x: auto; white-space: nowrap; }
+      .print-btn { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print {
+      body { background: white; font-size: 10.5pt; }
+      .hero { padding: 28px 20px; background: #13243a !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .layout { display: block; width: 100%; padding: 16px 0; }
+      .toc, .print-btn, .topbar { display: none; }
+      section { box-shadow: none; break-inside: avoid; margin: 0 0 12px; padding: 22px; }
+      h2, h3 { break-after: avoid; }
+      pre, table, .calculator { break-inside: avoid; }
+      details > :not(summary) { display: block !important; }
+      details summary { display: none; }
+      a { color: inherit; text-decoration: none; }
+      footer { margin: 0 auto 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar" aria-hidden="true"><span id="progress"></span></div>
+
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="eyebrow">Viva managed voice cloud · architecture dossier</div>
+      <h1>把密钥留在服务器，<br>把声音的路径缩到最短。</h1>
+      <p class="hero-lead">一份面向 Viva 的完整前后端分离方案：用户安装后零 API Key 配置，实时语音和大模型请求统一进入你的服务器，再安全转发至火山引擎；同时尽量保留直连的识别结果、首字速度和逐句上屏体验。</p>
+      <div class="hero-meta">
+        <span>代码基线：d100000/viva</span>
+        <span>研究日期：2026-07-28</span>
+        <span>交付形态：单文件离线 HTML</span>
+        <span>推荐后端：Go 实时网关 + 首版方舟 Adapter</span>
+        <span>实施交接：OpenAPI + AsyncAPI + PostgreSQL</span>
+      </div>
+
+      <div class="latency-rail" aria-label="目标首字延迟预算">
+        <div class="rail-label"><span>目标：中转新增延迟 p95 ≤ 50ms，p99 ≤ 100ms</span><span>以真实 A/B 压测为准</span></div>
+        <div class="rail"><span class="r1"></span><span class="r2"></span><span class="r3"></span><span class="r4"></span></div>
+        <div class="rail-legend">
+          <div><b>0–150ms</b>长按判定 / 预缓冲</div>
+          <div><b>并行</b>网关鉴权 / 上游建连</div>
+          <div><b>200ms</b>官方建议音频分包</div>
+          <div><b>约 0.6–1.0s</b>火山首字主耗时</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="toc" aria-label="目录">
+      <strong>目录</strong>
+      <a href="#decision">01 · 结论先行</a>
+      <a href="#baseline">02 · 当前代码基线</a>
+      <a href="#research">03 · 公开方案与开源调研</a>
+      <a href="#options">04 · 三种架构比较</a>
+      <a href="#target">05 · 推荐目标架构</a>
+      <a href="#protocol">06 · 网关协议设计</a>
+      <a href="#auth">07 · 零配置认证与防滥用</a>
+      <a href="#server">08 · 服务端实现方案</a>
+      <a href="#deploy">09 · 低成本部署</a>
+      <a href="#latency">10 · 最低延迟优化</a>
+      <a href="#llm">11 · 大模型链路</a>
+      <a href="#security">12 · 安全、隐私与合规</a>
+      <a href="#cost">13 · 成本模型与计算器</a>
+      <a href="#product">14 · 产品与套餐设计</a>
+      <a href="#client">15 · Viva 客户端改造</a>
+      <a href="#tests">16 · 实验与验收</a>
+      <a href="#roadmap">17 · 分阶段路线图</a>
+      <a href="#risks">18 · 风险清单</a>
+      <a href="#sources">19 · 资料来源</a>
+    </nav>
+
+    <main>
+      <section id="decision">
+        <div class="section-kicker">01 / Executive decision</div>
+        <h2>推荐方案：先做透明代理，再把 ASR 与 LLM 合并成托管管线</h2>
+        <p class="lede">第一版不要重写火山 SAUC 协议。让 Viva 继续生成现在已经实测稳定的二进制首包、音频包和末包；你的服务器验证首包、注入长期密钥，并把每条 WebSocket message 原样转发。识别返回帧也原样回传。</p>
+
+        <div class="verdict">
+          <div class="verdict-main">
+            <h3>阶段一：SAUC 二进制透明代理</h3>
+            <p><strong>目标：</strong>最快上线、结果与直连最大程度一致、客户端改动最少。</p>
+            <p><strong>边界：</strong>一条客户端 WebSocket 对应一条火山 WebSocket；不合包、不重压缩、不改返回帧语义。</p>
+          </div>
+          <div class="verdict-side">
+            <h3>阶段二：<code>/v2/realtime</code> 托管语音管线</h3>
+            <p>未来可让服务器在 ASR final 后直接调用方舟并通过新实时协议返回润色增量；这不属于当前 v1 AsyncAPI，必须先定义独立 <code>/v2/realtime</code> 机器契约，不能把新事件塞进 <code>/v1/asr/stream</code>。</p>
+          </div>
+        </div>
+
+        <div class="grid-3">
+          <div class="card"><div class="metric">0</div><div class="metric-label">前端保存的火山/LLM 长期密钥</div></div>
+          <div class="card"><div class="metric">1 : 1</div><div class="metric-label">客户端会话与上游火山会话映射</div></div>
+          <div class="card"><div class="metric">200ms</div><div class="metric-label">主音频分包；官方称优化版性能更优</div></div>
+        </div>
+
+        <div class="callout danger"><strong>必须接受的事实：</strong>增加一台中转服务器后，不可能在所有网络条件下保证“网络延迟绝对等于直连”。可实现的是：识别参数与帧语义一致、额外延迟可测且稳定，并通过常驻自有连接、同区部署和服务器端直接串联 LLM，把新增开销压到用户难以感知。</div>
+      </section>
+
+      <section id="baseline">
+        <div class="section-kicker">02 / Code baseline</div>
+        <h2>Viva 当前已经具备一条很好的低延迟客户端链路</h2>
+        <p>现有代码并不是“录完再上传”，而是完整的实时流：麦克风常驻预热、400ms 环形预缓冲、16kHz/16bit/mono PCM、200ms 分包、火山 <code>bigmodel_async</code> 双向 WebSocket、partial 悬浮预览、definite 逐句上屏以及长会话轮转。</p>
+
+        <div class="pipeline">
+          <div class="step"><b>右⌘长按</b><small>默认超过 150ms 才触发，减少误计费</small></div>
+          <div class="step"><b>音频预热</b><small>常驻 Core Audio + 400ms pre-roll</small></div>
+          <div class="step"><b>PCM 分包</b><small>16k / Int16 / mono / 6400B ≈ 200ms</small></div>
+          <div class="step"><b>SAUC WebSocket</b><small>客户端直接携带火山 API Key 建连</small></div>
+          <div class="step"><b>partial / definite</b><small>预览与可安全上屏文本分离</small></div>
+          <div class="step"><b>LLM 润色</b><small>整段结束后由客户端再次请求模型</small></div>
+        </div>
+
+        <h3>需要改变的不是音频前半段，而是“凭证与服务商调用归属”</h3>
+        <table class="decision">
+          <thead><tr><th>现状</th><th>代码证据</th><th>托管化后的目标</th></tr></thead>
+          <tbody>
+            <tr><td>火山长期 Key 在客户端</td><td><code>Config.authHeaders()</code> 生成 <code>x-api-key</code> 等握手头</td><td>客户端只持有你的短期 access token；上游 Key 由服务器注入</td></tr>
+            <tr><td>LLM Key、Base URL、模型名都在客户端</td><td><code>LLMPolisher</code> 拼 URL、鉴权头和请求体</td><td>客户端只提交文本与模式；模型、Prompt、预算都由服务器控制</td></tr>
+            <tr><td>Key 明文存入本地 JSON</td><td><code>~/.config/viva/config.json</code>，权限 0600 但未加密</td><td>refresh token 放 macOS Keychain，access token 仅驻内存</td></tr>
+            <tr><td>上游错误直接由客户端分诊</td><td>对 401/403、45000081、55000031 等做本地诊断</td><td>网关返回稳定的产品错误码，同时保留火山 logid 供客服追踪</td></tr>
+          </tbody>
+        </table>
+
+        <div class="grid-2">
+          <div class="card">
+            <h3>现有优势必须保留</h3>
+            <ul class="checklist">
+              <li>先启动 WebSocket，再取预缓冲并补发</li>
+              <li>partial 永不直接写入输入框</li>
+              <li>只认帧头 final flags，不把 definite 当会话结束</li>
+              <li>50/75 秒主动轮转，避免长会话被掐</li>
+              <li>润色失败时退回原文，绝不丢内容</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>应顺手修正的隐私项</h3>
+            <ul>
+              <li>首包当前使用本机主机名作为 <code>user.uid</code>；托管客户端应改为生成不可逆伪设备 ID，Gateway 只校验并默认原样转发。</li>
+              <li>最近 3 条识别历史与热词会随首包发送，应在隐私说明中明确。</li>
+              <li>前台 App 名继续保持默认关闭，只在用户主动开启时发送。</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="callout warn"><strong>一个会直接影响首字延迟的现有细节：</strong><code>AudioCapture.startCapturing()</code> 会把预缓冲中所有完整的 200ms 块拼成一个 <code>Data</code> 返回，<code>VoiceSession</code> 再把它作为一条 WebSocket message 发出。默认 400ms 预缓冲因此可能形成一个 400ms 首音频包，超出火山官方建议的 100–200ms。托管客户端改造时应按原顺序拆回 100–200ms message；不要丢掉预缓冲，也不要在服务器端转码。</div>
+      </section>
+
+      <section id="research">
+        <div class="section-kicker">03 / Field research</div>
+        <h2>公开项目已经验证“设备 → 自有服务 → 火山 ASR”可行</h2>
+        <p class="lede">最有价值的服务端参照不是另一个 macOS 输入工具，而是 <a href="https://github.com/xinnan-tech/xiaozhi-esp32-server">xiaozhi-esp32-server</a>：它在服务器端接收设备音频、建立火山 WebSocket、缓存并补发音频、解析 definite 结果，再进入 LLM/TTS 管线。另一个小而直接的参考是 <a href="https://github.com/gydx6/doubao-asr2-openai-proxy">doubao-asr2-openai-proxy</a>，它已经明确接入 Seed-ASR 2.0，说明早期“没有开源项目验证 2.0”的结论已经过时。</p>
+
+        <table class="decision">
+          <thead><tr><th>项目</th><th>可借鉴部分</th><th>许可证/状态</th><th>不应直接照搬的部分</th></tr></thead>
+          <tbody>
+            <tr class="recommended"><td><a href="https://github.com/xinnan-tech/xiaozhi-esp32-server">xiaozhi-esp32-server</a></td><td>服务器端流式 ASR provider、音频缓存、WebSocket、认证与多 Provider 架构</td><td>MIT；约 10k★；持续更新</td><td>面向 IoT 对话助手，远重于输入法网关；示例日志会输出鉴权头/请求，复用前必须删除敏感日志并收紧超大 message 配置</td></tr>
+            <tr><td><a href="https://github.com/gydx6/doubao-asr2-openai-proxy">doubao-asr2-openai-proxy</a></td><td>Seed-ASR 2.0 帧编解码、错误映射、logid 与预检脚本</td><td>Node.js / MIT；小型项目</td><td>是“完整文件 → OpenAI transcription REST”桥，不是真实时多租户网关</td></tr>
+            <tr><td><a href="https://github.com/BerriAI/litellm">LiteLLM</a></td><td>OpenAI 兼容 LLM 网关、虚拟 Key、预算、回退、负载均衡、成本追踪</td><td>主体 MIT；enterprise 目录另有商业许可；约 55k★</td><td>不负责火山 SAUC 音频协议；不要把它直接暴露成用户可任意调用的通用模型 Key</td></tr>
+            <tr><td><a href="https://github.com/QuantumNous/new-api">New API</a></td><td>用户、令牌、充值、额度、模型聚合和管理后台</td><td>AGPL-3.0；约 44k★</td><td>网络服务修改版有开源义务；业务逻辑较重，闭源商业产品需先评估许可证</td></tr>
+            <tr><td><a href="https://github.com/HaujetZhao/CapsWriter-Offline">CapsWriter-Offline</a></td><td>清晰的客户端/服务端分离、热键语音输入、热词与 LLM 润色</td><td>MIT；约 6.5k★</td><td>以 Windows + 本地 FunASR 为主，不是火山托管网关</td></tr>
+            <tr><td><a href="https://github.com/joewongjc/type4me">type4me</a></td><td>Swift 火山客户端、热词、文本注入与多 LLM 后处理</td><td>MIT；成熟客户端参照</td><td>主要是客户端直连，不解决集中鉴权和计费</td></tr>
+            <tr><td><a href="https://github.com/mylxsw/typeflux">typeflux</a></td><td>完整 Swift 协议编解码、预热、重试与测试</td><td>AGPL-3.0</td><td>闭源产品不应直接复制；运行修改后的网络服务还涉及 AGPL 源码提供义务</td></tr>
+            <tr><td><a href="https://github.com/Open-Less/openless">OpenLess</a></td><td>Rust SAUC 协议、错误处理与非输入法文本注入</td><td>MIT</td><td>仍偏客户端实现</td></tr>
+            <tr><td><a href="https://github.com/modelscope/FunASR">FunASR</a> / <a href="https://github.com/k2-fsa/sherpa-onnx">sherpa-onnx</a></td><td>本地或自托管 ASR 兜底，避免云服务故障时完全不可用</td><td>开源；模型许可需逐项核对</td><td>需要算力、运维和中文准确率调优，不能默认达到火山 2.0 效果</td></tr>
+            <tr><td><a href="https://github.com/QuentinFuxa/WhisperLiveKit">WhisperLiveKit</a></td><td>成熟的实时 WebSocket、并发用户、VAD、稳定前缀和 Deepgram 兼容协议</td><td>Apache-2.0；约 10k★</td><td>通常需要 GPU；中文、热词、标点和 definite 语义不会与 Seed-ASR 完全一致</td></tr>
+            <tr><td><a href="https://github.com/speaches-ai/speaches">Speaches</a></td><td>OpenAI-compatible Realtime 事件设计，可作为第二阶段统一协议范本</td><td>MIT</td><td>本地模型服务，不是火山 SAUC 中转；真正实时常依赖 CUDA</td></tr>
+          </tbody>
+        </table>
+
+        <p>火山还公开了测试阶段的 <a href="https://www.volcengine.com/docs/6893/1527759">边缘大模型网关 Realtime API</a>。其 <code>transcription_session.update</code>、<code>input_audio_buffer.append/commit</code>、<code>completed</code> 等事件适合作为第二阶段自有协议的命名参考；但文档对真正增量 <code>delta</code> 的支持有限，因此客户端协议应优先传“当前完整快照 + definite/final”，不要假设所有上游都能给 token 级增量。</p>
+
+        <div class="callout good"><strong>调研结论：</strong>开源代码足以证明服务端流式转发可行，但没有哪个项目可以原封不动满足 Viva。最省风险的组合是：自研一个很薄的 Go SAUC 网关，首版 LLM 直接实现方舟轻量 Adapter；确有多 Provider 需求后再引入仅内网可见的 LiteLLM。用户、套餐和用量控制保持在你的业务服务内。</div>
+      </section>
+
+      <section id="options">
+        <div class="section-kicker">04 / Architecture options</div>
+        <h2>三种架构的取舍</h2>
+        <table class="decision">
+          <thead><tr><th>方案</th><th>结果一致性</th><th>首版开发量</th><th>延迟</th><th>供应商可替换性</th><th>建议</th></tr></thead>
+          <tbody>
+            <tr><td>A. 客户端继续直连火山，仅向服务器取临时凭证</td><td>最高</td><td>低</td><td>最低</td><td>低</td><td><span class="badge red">不建议</span> 如果火山不提供安全的短期会话凭证，你仍会把可滥用凭证发给客户端</td></tr>
+            <tr class="recommended"><td>B. SAUC 二进制透明代理</td><td>极高</td><td>中低</td><td>增加一段网络，但可压到很小</td><td>中低</td><td><span class="badge">首版推荐</span> 最大程度复用现有实测协议</td></tr>
+            <tr><td>C. 自定义统一语音协议，服务器完全解析/生成 SAUC</td><td>取决于实现</td><td>高</td><td>可优化</td><td>最高</td><td><span class="badge warn">第二阶段</span> 适合多 ASR Provider 和服务器端 ASR→LLM 串联</td></tr>
+          </tbody>
+        </table>
+
+        <h3>为什么第一版不直接选择 C</h3>
+        <p>当前 <code>SaucProtocol.swift</code> 已处理两条 sequence 路线、错误帧差异、gzip、防御性长度解析，以及官方表中未记录但 <code>bigmodel_async</code> 会出现的 <code>asyncFinal = 0b0100</code>。第一版同时重写这些协议细节，会把“服务端化”和“协议重构”两个高风险变量绑在一起，难以定位回归。</p>
+      </section>
+
+      <section id="target">
+        <div class="section-kicker">05 / Target architecture</div>
+        <h2>目标系统：数据面极薄，控制面完整</h2>
+
+        <div class="flow">
+          <div class="node"><b>Viva macOS 客户端</b><span>采集、预缓冲、热词、SAUC 编码、HUD、文本注入、Keychain Token</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><b>自有实时网关</b><span>JWT 验签、并发/额度、首包白名单校验、逐帧代理、trace、异步计量</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><b>火山引擎</b><span>豆包流式语音识别 2.0 + 火山方舟轻量模型</span></div>
+        </div>
+
+        <div class="grid-3">
+          <div class="card">
+            <h3>数据面</h3>
+            <p>Go Realtime Gateway。只做与每个音频帧直接相关的工作，不同步访问数据库，不写原始音频，不调用慢风控。</p>
+          </div>
+          <div class="card">
+            <h3>控制面</h3>
+            <p>设备注册、用户登录、套餐、支付、配额、密钥轮换、模型策略、管理后台、封禁与申诉。</p>
+          </div>
+          <div class="card">
+            <h3>观测面</h3>
+            <p>Prometheus 指标、结构化日志、OpenTelemetry trace、火山 <code>X-Tt-Logid</code> 映射；默认不记录音频和全文。</p>
+          </div>
+        </div>
+
+        <h3>推荐请求路径</h3>
+        <pre>首次启动
+Viva → POST /v1/client/bootstrap → 匿名试用身份 + refresh token(Keychain)
+
+每次开始说话
+Viva → WSS /v1/asr/stream  (Authorization: DPoP &lt;短期 token&gt; + DPoP proof)
+Gateway → WSS openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+Viva ⇄ Gateway ⇄ 火山：SAUC binary messages 1:1 转发
+
+启用润色时（当前 v1）
+Viva 收到 ASR final → POST /v1/text/polish/stream → SSE delta / final
+
+未来目标态
+另行定义 /v2/realtime 后，服务器才可在同一产品会话中串联 ASR → 方舟</pre>
+      </section>
+
+      <section id="protocol">
+        <div class="section-kicker">06 / Gateway protocol</div>
+        <h2>第一版协议：二进制帧保持兼容，文本帧只承载网关控制消息</h2>
+
+        <table class="decision">
+          <thead><tr><th>方向</th><th>WebSocket message</th><th>处理规则</th></tr></thead>
+          <tbody>
+            <tr><td>客户端 → 网关</td><td>第一条 binary：SAUC full client request</td><td>只读解析和白名单校验；managed client 必须已使用伪 UID，默认按原字节转发；不接受上游 URL、resourceId 或密钥</td></tr>
+            <tr><td>客户端 → 网关</td><td>后续 binary：SAUC audio only request</td><td>每条 message 原样、串行转发；检查帧类型、字节速率、时长和末包</td></tr>
+            <tr><td>火山 → 网关 → 客户端</td><td>binary：全部 SAUC response</td><td>不改 sequence、flags、gzip、payload、close 时序</td></tr>
+            <tr><td>网关 → 客户端</td><td>text：<code>gateway.*</code> JSON</td><td>返回 trace_id、logid、额度、网关错误和重试建议；客户端不要交给 SAUC parser</td></tr>
+          </tbody>
+        </table>
+
+        <h3>控制消息示例</h3>
+        <pre>{
+  "type": "gateway.session.accepted",
+  "protocol_version": 1,
+  "session_id": "019b1b7d-3f03-7d13-a26b-0ce90c24b714",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "limits": {
+    "max_session_ms": 75000,
+    "gateway_absolute_session_ms": 90000,
+    "max_audio_bytes": 2400000,
+    "max_binary_message_bytes": 131072
+  }
+}
+
+{
+  "type": "gateway.upstream.ready",
+  "session_id": "019b1b7d-3f03-7d13-a26b-0ce90c24b714",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "upstream_log_id": "20260728...",
+  "connect_ms": 42
+}
+
+{
+  "type": "gateway.error",
+  "session_id": "019b1b7d-3f03-7d13-a26b-0ce90c24b714",
+  "code": "QUOTA_EXHAUSTED",
+  "message": "本月语音时长已用完",
+  "retryable": false,
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+}</pre>
+
+        <h3>首包白名单</h3>
+        <div class="grid-2">
+          <div class="card"><h4>允许</h4><ul><li><code>show_utterances=true</code></li><li><code>result_type=full</code></li><li><code>end_window_size</code> 在产品允许范围内</li><li>标点、ITN、DDC、繁简体和加速开关</li><li>受长度限制的热词与 dialog context</li></ul></div>
+          <div class="card"><h4>强制校验/拒绝</h4><ul><li>上游 endpoint、resourceId、任何火山凭证</li><li>音频必须 16kHz / 16bit / mono</li><li><code>model_name</code> 固定为产品选定模型</li><li><code>user.uid</code> 必须是客户端生成的伪 ID，拒绝主机名等直接标识</li><li>过大 payload、超长会话和异常发包频率</li></ul></div>
+        </div>
+
+        <div class="callout warn"><strong>不要把你的服务做成“通用火山代理”。</strong>客户端只能调用产品定义的 ASR 能力，不能提交任意上游地址、资源 ID 或请求头，否则一个普通 Viva token 会变成可被脚本批量盗刷的云服务万能凭证。</div>
+      </section>
+
+      <section id="auth">
+        <div class="section-kicker">07 / Zero-config auth</div>
+        <h2>“用户不用填 API Key”不等于“客户端不需要身份”</h2>
+        <p class="lede">桌面 App 里任何固定 secret 都能被逆向提取。正确做法是让首次安装自动生成设备密钥并领取小额试用身份；持续使用或付费后，再绑定账号/许可证。</p>
+
+        <ol>
+          <li><strong>设备生成密钥：</strong>首次启动生成 P-256 密钥对；私钥放 Keychain/Secure Enclave，服务器只保存 public JWK 与安装 ID 哈希。</li>
+          <li><strong>自动 bootstrap：</strong><code>POST /v1/client/bootstrap</code> 提交 App/设备信息、随机安装 ID 和 public JWK；Header 携带无 Access Token 的 Token Endpoint DPoP proof，proof JWK 必须与 body 中的设备 JWK 一致。</li>
+          <li><strong>签发令牌：</strong>access token 10 分钟，仅驻内存；refresh token 30 天，放 Keychain 并滚动轮换。</li>
+          <li><strong>匿名试用：</strong>按设备、IP 段、ASN、版本、并发和时长设小额度；异常时要求登录或验证码。</li>
+          <li><strong>付费绑定：</strong>网站登录/支付后通过 Universal Link 或 <code>viva://activate</code> 回到 App，用户不复制任何 Key。</li>
+        </ol>
+
+        <table class="decision">
+          <thead><tr><th>措施</th><th>能防什么</th><th>不能防什么</th></tr></thead>
+          <tbody>
+            <tr><td>设备公钥签名</td><td>简单复制 token、伪造设备请求</td><td>攻击者完全控制一台真实设备后的自动化</td></tr>
+            <tr><td>短期 JWT + refresh rotation</td><td>泄漏后的长期滥用、封禁传播慢</td><td>在线窃取且即时使用</td></tr>
+            <tr><td>每设备/账号并发 1</td><td>把一个账号当公共代理池</td><td>大量注册新账号</td></tr>
+            <tr><td>按音频毫秒计量</td><td>空闲挂连接、伪造客户端显示</td><td>低速真人薅试用</td></tr>
+            <tr><td>服务端模型与 Prompt 白名单</td><td>把润色接口滥用成通用聊天 API</td><td>在允许文本内进行内容攻击；仍需内容安全策略</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="server">
+        <div class="section-kicker">08 / Server implementation</div>
+        <h2>推荐技术栈：Go 负责实时数据面，Postgres/Redis 负责控制面</h2>
+
+        <table class="decision">
+          <thead><tr><th>组件</th><th>推荐</th><th>理由</th></tr></thead>
+          <tbody>
+            <tr><td>实时网关</td><td>Go 当前稳定版并锁定 toolchain，<code>net/http</code> + <code>github.com/coder/websocket</code></td><td>双 WebSocket I/O 成本低、Context/取消语义清晰；避免新项目继续采用已迁移的 <code>nhooyr/websocket</code> 路径</td></tr>
+            <tr><td>LLM 网关</td><td>首版直接调用方舟；多模型后引入 LiteLLM（仅内网）</td><td>避免过早引入重控制面，同时保留供应商回退能力</td></tr>
+            <tr><td>数据库</td><td>PostgreSQL 16</td><td>用户、设备、套餐、订单、使用记录与审计数据的事实来源</td></tr>
+            <tr><td>缓存/限流</td><td>Valkey 8+ 或许可证明确的托管 Redis-compatible 服务</td><td>并发租约、短时配额、refresh 撤销、幂等键；音频帧不经过缓存层</td></tr>
+            <tr><td>入口</td><td>云负载均衡；单机阶段用 Nginx/Caddy</td><td>TLS、WebSocket Upgrade、证书更新、限连接</td></tr>
+            <tr><td>密钥</td><td>云 Secret Manager/KMS；MVP 可用权限 600 的独立 env 文件</td><td>不写进镜像、Git、日志或数据库明文</td></tr>
+            <tr><td>观测</td><td>Prometheus + Grafana + Loki/云日志 + OpenTelemetry</td><td>必须拆分网关、上游和模型三段延迟</td></tr>
+          </tbody>
+        </table>
+
+        <h3>网关核心伪代码</h3>
+        <pre>func StreamASR(w http.ResponseWriter, r *http.Request) {
+    claims := VerifyAccessTokenAndDPoP(r)        // 本地验签，不查数据库
+    lease := AcquireConcurrencyAndQuota(claims) // 原子租约 + 额度预留
+    defer lease.ReleaseOrSettle()
+
+    client := UpgradeWebSocket(w, r)
+    defer client.Close()
+
+    // 关键：上游建连与读取/校验客户端首包并行，不能串行多等一个 RTT。
+    upstreamCh := DialVolcAsync(VolcHeadersFromSecretManager())
+    firstCh := ReadAndValidateFirstSAUCAsync(client, claims)
+    upstream, first := AwaitBoth(upstreamCh, firstCh)
+    defer upstream.Close()
+
+    // managed client 已生成伪 UID；默认保持整条 SAUC message 字节不变。
+    // 只有显式兼容旧客户端的版本化路径才允许受测 rewrite。
+    upstream.WriteBinary(first.RawMessage)
+    SendUpstreamReady(client, upstream.ResponseHeader("X-Tt-Logid"))
+
+    // 每个方向只有一个 writer；有界队列；任一方向失败即取消另一方向。
+    go PumpClientAudioToVolc(client, upstream, ByteRateLimit, SessionLimit)
+    PumpVolcFramesToClient(upstream, client)
+
+    // 会话结算进入持久 outbox/append-only ledger；不能只依赖内存 goroutine。
+    PersistUsageCompletion(forwardedAudioMilliseconds)
+}</pre>
+
+        <h3>关键并发规则</h3>
+        <ul>
+          <li>每个方向只有一个写协程，严格保持首包 → 音频包 → 末包顺序。</li>
+          <li>使用有界缓冲，例如每方向 8–16 个 message；满了就施加背压或结束会话，绝不无限吃内存。</li>
+          <li>已建立会话中 access token 到期不强断；下一次建连前刷新。</li>
+          <li>配额在连接前预留，音频时长按实际转发字节计算；结束后异步落库并对账。</li>
+          <li>客户端断开时立即关闭上游，防止孤儿 WebSocket 继续计费。</li>
+        </ul>
+
+        <h3>最小数据表</h3>
+        <pre>users(id, status, plan_id, created_at)
+devices(id, user_id, public_key, install_hash, last_seen_at, revoked_at)
+refresh_tokens(id, device_id, token_hash, expires_at, rotated_from, revoked_at)
+plans(id, monthly_audio_ms, model_tier, max_concurrency)
+subscriptions(id, user_id, plan_id, status, period_start, period_end)
+usage_sessions(id, user_id, device_id, trace_id, upstream_log_id,
+               audio_ms, asr_model, llm_model, input_tokens, output_tokens,
+               first_partial_ms, total_ms, status, created_at)
+usage_ledger(id, user_id, delta_ms, reason, idempotency_key, created_at)</pre>
+
+        <h3>可复制到新服务端仓库的实施交接包</h3>
+        <p>当前项目已经附带一套可直接复制到新仓库的<strong>实施基线 v1.0</strong>。研发与编码 AI 应先读 <a href="server-handoff/00-START-HERE.md">00-START-HERE.md</a>，REST/WebSocket/数据库分别以 OpenAPI、AsyncAPI 和 SQL 契约为准，不从这份研究长报告反推接口。</p>
+        <div class="grid-2">
+          <div class="card">
+            <h4>人类与编码 AI 的入口</h4>
+            <ul>
+              <li><a href="server-handoff/00-START-HERE.md">00-START-HERE.md</a>：文件权威关系与执行顺序</li>
+              <li><a href="server-handoff/01-SERVER-IMPLEMENTATION-SPEC.md">01-SERVER-IMPLEMENTATION-SPEC.md</a>：完整业务、架构、安全、部署和验收规格</li>
+              <li><a href="server-handoff/AI-IMPLEMENTATION-PROMPT.md">AI-IMPLEMENTATION-PROMPT.md</a>：新项目启动提示词</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h4>机器可读契约与部署参考</h4>
+            <ul>
+              <li><a href="server-handoff/openapi.yaml">openapi.yaml</a>：REST API</li>
+              <li><a href="server-handoff/asyncapi.yaml">asyncapi.yaml</a>：WSS/SAUC 与网关事件</li>
+              <li><a href="server-handoff/schema.sql">schema.sql</a>：PostgreSQL 逻辑模型</li>
+              <li><a href="server-handoff/postgres-init.local.sql">postgres-init.local.sql</a>、<a href="server-handoff/database-grants.sql">database-grants.sql</a>：本地角色引导与最小数据库权限</li>
+              <li><a href="server-handoff/docker-compose.local.yml">docker-compose.local.yml</a>、<a href="server-handoff/nginx.example.conf">nginx.example.conf</a>：本地与单机/Beta 参考</li>
+            </ul>
+          </div>
+        </div>
+
+        <details>
+          <summary>历史 P1/P2 契约审查记录（均已关闭，非待办）</summary>
+          <div>
+            <p>以下问题用于说明实施基线经历过的审查范围；当前状态以交接包和机器校验为准。若未来变更重新引入其中任何问题，CI/评审应再次阻断发布。</p>
+            <h4>已关闭 P1</h4>
+            <ol>
+              <li>给 ASR/WSS 操作显式声明 <code>voice.api.example.cn</code>，避免 OpenAPI 默认继承 <code>api.example.cn</code> 后生成错误 URL，并确保 DPoP <code>htu</code> 与实际握手 URI 完全一致。</li>
+              <li><code>logout-all</code> 与账号删除必须把“近期认证/step-up”做成必填且可验证的请求契约，不能只写在说明文字里。</li>
+              <li>Gateway 只挂 JWT 公钥/JWKS 与火山 ASR 凭证，不能挂 JWT 私钥、Refresh Pepper 或 PII Pepper；高暴露数据面必须遵守最小权限。</li>
+              <li>对象存储 Provider、MinIO endpoint、健康检查和幂等建桶流程必须一致，不能配置为 <code>filesystem</code> 却实际依赖一个尚未建桶的 MinIO。</li>
+              <li>所有同时带 <code>user_id</code> 与 <code>device_id</code> 的 Refresh family、ASR session、LLM request 都要用复合外键保证设备确实属于该用户。</li>
+              <li>Refresh rotation 必须保证一个旧 Token 只能生成一个同 family 后继；并发刷新时检测重放并撤销整个 family，禁止分叉和跨 family 链接。</li>
+              <li><code>usage_ledger</code> 的 append-only 要由数据库角色/触发器强制，计数器必须可从账本重建；隐私删除使用不可变匿名主体键或 crypto-shredding，不能直接改写历史账目。</li>
+              <li>套餐的 <code>draft/active/retired</code> 与 <code>sales_end_at</code> 放在版本级实体；已发布版本不可改写，历史权益不能被更新当前套餐时连带改变。</li>
+              <li>如果 API 支持部分退款，必须有独立退款实体、退款金额、外部退款 ID、永久幂等键、状态与失败记录；否则把 API 收紧为单次全额退款。</li>
+            </ol>
+            <h4>已关闭 P2</h4>
+            <ol>
+              <li>OTP 若要按设备限流，请求必须带安装/设备证明；否则只能按邮箱/IP 限流，不能宣称具备设备桶。</li>
+              <li>统一套餐会话上限 75 秒与 Gateway 绝对上限 90 秒的语义、字段名和错误码。</li>
+              <li>给 <code>support_agent</code> 权限补齐实际管理端点，或删除未落地的权限声明。</li>
+              <li>所有 AsyncAPI 示例补齐 schema 强制要求的 <code>trace_id</code>，让示例、Mock 和生成测试一致。</li>
+              <li>补齐 SMTP 地址、TLS 与认证配置，避免严格配置模式下 Compose 注入未声明字段。</li>
+              <li>本地 Compose 增加 OpenTelemetry Collector，或明确关闭 OTLP exporter，不能指向不存在的服务。</li>
+              <li>按角色设置关闭宽限：Gateway 保留约 90 秒排空，API/Worker 使用约 20–30 秒并与容器 stop grace 一致。</li>
+            </ol>
+          </div>
+        </details>
+      </section>
+
+      <section id="deploy">
+        <div class="section-kicker">09 / Deployment</div>
+        <h2>从一台机器开始，但把升级路径预先留好</h2>
+
+        <table class="decision">
+          <thead><tr><th>阶段</th><th>建议拓扑</th><th>适用规模</th><th>固定成本参考*</th></tr></thead>
+          <tbody>
+            <tr class="recommended"><td>封闭测试</td><td>北京 1×2C4G ECS；Docker Compose：Gateway + Postgres + Valkey + Caddy；每日异地备份</td><td>≤10 峰值并发</td><td>约 ¥150–400/月</td></tr>
+            <tr><td>公开 Beta</td><td>北京 2×2C4G Gateway + LB；托管 Postgres/Redis-compatible 缓存；日志与监控独立</td><td>10–50 峰值并发</td><td>约 ¥1,000–3,000/月，不含火山并发增购</td></tr>
+            <tr><td>规模化</td><td>多可用区 Gateway；自动扩容；托管数据库高可用；跨区灾备</td><td>50+ 峰值并发</td><td>约 ¥3,000–8,000+/月，不含上游用量与并发</td></tr>
+          </tbody>
+        </table>
+        <p class="small muted">* 云厂商、活动价、带宽计费和数据库规格差异很大，这些只是预算级假设。真正的主成本通常是 ASR 时长与火山并发增购。</p>
+
+        <h3>单机 Docker Compose 骨架</h3>
+        <pre>services:
+  gateway:
+    image: registry.example.com/viva-gateway:0.1.0
+    restart: unless-stopped
+    env_file: /etc/viva/gateway.env
+    depends_on: [postgres, valkey]
+    expose: ["8080"]
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes: ["valkeydata:/data"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+volumes: { pgdata: {}, valkeydata: {}, caddy_data: {} }</pre>
+
+        <h3>Nginx WebSocket 要点</h3>
+        <pre>map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+location /v1/asr/ {
+    proxy_pass http://viva_gateway;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Request-ID $request_id;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+}</pre>
+        <p>NGINX 官方说明 WebSocket 的 <code>Upgrade</code> 与 <code>Connection</code> 是 hop-by-hop header，反代时必须显式传递；默认 60 秒无数据会关闭连接，因此要提高 <code>proxy_read_timeout</code> 或发送 ping。</p>
+
+        <h3>生产上线清单</h3>
+        <div class="grid-2">
+          <div class="card"><h4>基础设施</h4><ul class="checklist"><li>大陆域名与 ICP 备案</li><li>TLS 1.2/1.3，自动续证</li><li>数据库每日备份 + 每周恢复演练</li><li>Secret Manager 与季度轮换</li><li>进程文件句柄、连接数和带宽告警</li></ul></div>
+          <div class="card"><h4>发布</h4><ul class="checklist"><li>灰度到内部账号</li><li>5% → 25% → 100% 客户端开关</li><li>支持一键回退直连/BYOK 高级模式</li><li>版本化协议与最小支持版本</li><li>网关与客户端兼容矩阵</li></ul></div>
+        </div>
+      </section>
+
+      <section id="latency">
+        <div class="section-kicker">10 / Latency</div>
+        <h2>最低延迟的关键不是“更快服务器”，而是把串行等待改成并行</h2>
+
+        <table class="decision">
+          <thead><tr><th>优化</th><th>预期价值</th><th>注意事项</th></tr></thead>
+          <tbody>
+            <tr><td>网关部署在中国大陆、优先北京做基线</td><td>缩短网关 → 火山/方舟路径</td><td>不要凭地理直觉定终局；用北京/上海/广州真实 A/B 数据选区</td></tr>
+            <tr><td>首版每次会话新建 WSS，但启用 DNS 缓存、TLS 1.3 会话恢复与控制 API keep-alive</td><td>减少握手成本，同时保持“一条客户端 WS 对应一条火山 WS”的清晰边界</td><td>跨会话长期复用同一 WSS 属于第二阶段自定义协议；不要在透明代理阶段偷偷引入</td></tr>
+            <tr><td>热键触发后并行：上游建连 + 本地采集</td><td>握手时间被 200–400ms 音频缓冲覆盖</td><td>现有 Viva 已先 <code>startASRClient()</code> 再取 pre-roll，应保留</td></tr>
+            <tr><td>把 400ms pre-roll 拆成 100–200ms message，主包维持 200ms</td><td>符合官方建议，避免首个音频 message 过大拖慢首字</td><td>只改变 WebSocket message 边界，不改变 PCM 字节、顺序或总时长；先做逐帧 A/B</td></tr>
+            <tr><td>关闭 WebSocket per-message deflate</td><td>避免对 PCM/SAUC 重复压缩与 CPU 抖动</td><td>当前 SAUC 音频帧为 raw PCM，可评估 Opus 作为成本模式，但会改变链路</td></tr>
+            <tr><td>热路径本地 JWT/DPoP 验签</td><td>去掉数据库 RTT</td><td>撤销状态用短 token + Valkey/Redis-compatible 版本号折中</td></tr>
+            <tr><td>LLM 使用 mini/lite 非推理模型</td><td>润色首 token 与总耗时显著下降</td><td>强制关闭 thinking；输出 token 上限按原文长度设置</td></tr>
+            <tr><td>ASR final 在服务器直接进入 LLM</td><td>省一次客户端 → 服务器请求 RTT</td><td>属于第二阶段，需要统一网关事件协议</td></tr>
+          </tbody>
+        </table>
+
+        <h3>必须新增的分段 trace</h3>
+        <pre>hotkey_physical_down
+session_begin
+client_ws_ready
+gateway_first_audio_received
+upstream_ws_open
+upstream_first_audio_sent
+upstream_first_partial_received
+client_first_partial_received
+asr_final_received
+llm_request_sent
+llm_first_token_received
+text_injected</pre>
+        <p>只有这些时间点齐全，才能知道额外 80ms 是发生在客户端握手、网关排队、火山握手还是模型首 token。建议 SLO：</p>
+        <div class="grid-4">
+          <div class="card"><div class="metric">≤50ms</div><div class="metric-label">中转新增 p95</div></div>
+          <div class="card"><div class="metric">≤100ms</div><div class="metric-label">中转新增 p99</div></div>
+          <div class="card"><div class="metric">≥99.9%</div><div class="metric-label">会话成功率</div></div>
+          <div class="card"><div class="metric">0</div><div class="metric-label">代理导致的帧重排/丢帧</div></div>
+        </div>
+      </section>
+
+      <section id="llm">
+        <div class="section-kicker">11 / LLM pipeline</div>
+        <h2>大模型接口应该是“产品能力”，不是“通用 OpenAI 代理”</h2>
+        <p>客户端只提交原文、润色模式和用户主动授权的上下文；服务器固定 system prompt、模型白名单、关闭思考参数、最大 token 和安全护栏。这样一个被提取的用户 token 只能润色文本，不能被拿去跑任意聊天、代码生成或超长上下文。</p>
+
+        <pre>POST /v1/text/polish/stream
+Authorization: DPoP &lt;access-token&gt;
+DPoP: &lt;proof-jwt&gt;
+X-Viva-Device-ID: 019b1b7d-3f03-7d13-a26b-0ce90c24b714
+Idempotency-Key: 019b1b7d-3f03-7d13-a26b-0ce90c24b715
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "request_id": "019b1b7d-3f03-7d13-a26b-0ce90c24b716",
+  "text": "明天下午三点，呃不对，四点开会",
+  "mode": "both",
+  "model_tier": "fast",
+  "locale": "zh-CN",
+  "prompt_version": "polish-v1",
+  "app_context": null
+}</pre>
+
+        <h3>推荐模型策略</h3>
+        <ul>
+          <li><strong>默认档：</strong>国内 mini/flash 非推理模型；温度 0–0.2；关闭 thinking；目标 1 秒内完成短句。</li>
+          <li><strong>质量档：</strong>仅对长文本或用户主动选择时使用 lite/pro，设置更严格的超时和额度。</li>
+          <li><strong>故障回退：</strong>主模型 429/5xx 时回退第二家国内模型；不得因回退把数据跨境发送，除非用户明确同意。</li>
+          <li><strong>Prompt 版本化：</strong>服务器记录 <code>prompt_version</code>，可灰度和回滚；客户端不上传任意 system prompt。</li>
+          <li><strong>双重护栏：</strong>服务器做长度/语言/相似度检查，客户端继续保留现有 <code>isSaneResult()</code>。</li>
+        </ul>
+
+        <div class="callout good"><strong>未来 v2 的延迟最优目标态：</strong>服务器接到火山 final 后立即调用方舟，客户端不再单独发起润色 HTTP 请求。该能力必须先新增 <code>/v2/realtime</code> 协议和机器契约；当前 v1 仍由客户端在收到 final 后调用 <code>/v1/text/polish/stream</code>，失败则使用原文。</div>
+      </section>
+
+      <section id="security">
+        <div class="section-kicker">12 / Security &amp; privacy</div>
+        <h2>默认不落音频、不记全文，密钥和计量都在服务端完成</h2>
+
+        <table class="decision">
+          <thead><tr><th>风险</th><th>控制措施</th></tr></thead>
+          <tbody>
+            <tr><td>火山/LLM Key 泄漏</td><td>Secret Manager/KMS；最小权限；多环境分离；日志全量脱敏；定期轮换</td></tr>
+            <tr><td>客户端 token 被提取</td><td>短期 JWT、设备公钥签名、并发 1、额度、异常速率封禁、refresh rotation</td></tr>
+            <tr><td>音频/文本泄露</td><td>TLS；内存流转；默认不持久化；错误日志只存长度、哈希、trace 与供应商 logid</td></tr>
+            <tr><td>Prompt 注入/接口滥用</td><td>产品专用 schema；服务端 system prompt；模型/长度/token 白名单；输出相似度护栏</td></tr>
+            <tr><td>重放与重复扣费</td><td>DPoP <code>jti</code> 重放缓存、<code>request_id</code> + <code>Idempotency-Key</code>、服务端 usage ledger</td></tr>
+            <tr><td>孤儿连接继续计费</td><td>客户端断开即取消上游 context；双向 pump 共享 cancel；会话最大时长</td></tr>
+            <tr><td>服务商故障</td><td>明确错误、指数退避、熔断；LLM 可回退，ASR 首版不做静默跨厂商切换</td></tr>
+            <tr><td>集中托管/转供授权不明确</td><td>公开 Beta 和收费前取得火山关于面向终端用户集中托管、计费归属、并发扩容和企业容量的书面确认；不能仅凭技术上可调用就假定合同允许</td></tr>
+          </tbody>
+        </table>
+
+        <h3>面向中国大陆用户的合规清单</h3>
+        <ul>
+          <li>隐私政策明确说明：音频先到你的服务器，再转发火山；开启润色后，识别文本还会进入所选模型服务。</li>
+          <li>说明处理目的、数据类型、保存时长、第三方处理者、删除路径、客服渠道和账户注销方式。</li>
+          <li>默认使用境内模型与境内部署；如果提供海外模型，单独提示跨境风险并取得明确选择。</li>
+          <li>不要默认记录音频或完整文本；调试采样必须显式开启、限时、可见并可删除。</li>
+          <li>面向公众提供生成式 AI 功能、收费互联网服务、域名和 App 分发可能涉及额外备案/许可义务，应在正式商用前由专业法律顾问确认。</li>
+        </ul>
+        <p class="small muted">本节是工程合规检查表，不构成法律意见。核心参考包括《中华人民共和国个人信息保护法》和《生成式人工智能服务管理暂行办法》。</p>
+      </section>
+
+      <section id="cost">
+        <div class="section-kicker">13 / Cost model</div>
+        <h2>成本大头是语音时长与峰值并发，LLM 润色通常很便宜</h2>
+        <p>火山官方计费页（页面更新于 2026-07-08）显示：豆包流式语音识别模型 2.0 后付费为 <strong>¥1/小时</strong>，资源包约 <strong>¥0.80–0.93/小时</strong>；正式版默认支持 <strong>50 路并发</strong>，时长版额外并发约 <strong>¥100/并发/月</strong>。另有约 ¥500/并发/月且不再按时长收费的纯并发版。按调用后付费的旧“流式语音识别”表价更高，不应与 2.0 混算。</p>
+
+        <table class="decision">
+          <thead><tr><th>豆包流式语音识别模型 2.0</th><th>公开价格</th><th>折算</th></tr></thead>
+          <tbody>
+            <tr><td>后付费</td><td>¥1 / 小时</td><td>适合用量极不稳定或资源包兜底</td></tr>
+            <tr><td>30 小时资源包</td><td>¥28</td><td>约 ¥0.93 / 小时</td></tr>
+            <tr><td>1,000 小时资源包</td><td>¥900</td><td>¥0.90 / 小时</td></tr>
+            <tr><td>10,000 小时资源包</td><td>¥8,800</td><td>¥0.88 / 小时</td></tr>
+            <tr><td>100,000 小时资源包</td><td>¥85,000</td><td>¥0.85 / 小时</td></tr>
+            <tr><td>300,000 小时资源包</td><td>¥240,000</td><td>¥0.80 / 小时</td></tr>
+            <tr><td>时长版并发</td><td>默认 50；超出约 ¥100 / 路 / 月</td><td>早期推荐</td></tr>
+            <tr><td>纯并发版</td><td>约 ¥500 / 路 / 月，不再按小时收费</td><td>与默认含 50 路的时长版相比约 556 小时/槽；第 51 路起若另付 ¥100/月并发费，则约 444 小时/增量槽</td></tr>
+          </tbody>
+        </table>
+
+        <h3>三档预算示例</h3>
+        <p class="small muted">统一假设：每人每天 8 分钟、每月 22 天、ASR ¥0.90/小时、PCM 公网出站 ¥0.80/GB、每小时 30 次润色、每次 800 输入/120 输出 token、每日 12 小时集中使用、峰值系数 2.2、默认含 50 路并发。基础设施分别按 ¥300 / ¥1,500 / ¥5,000 估算。</p>
+        <table class="decision">
+          <thead><tr><th>规模</th><th>月语音时长</th><th>估算峰值并发</th><th>月总成本</th><th>单 MAU 成本</th><th>主要结论</th></tr></thead>
+          <tbody>
+            <tr><td>100 MAU</td><td>约 293 小时</td><td>3 路</td><td>约 ¥595</td><td>约 ¥5.95</td><td>固定服务器成本占比最高；一台 2C4G 足够做封闭测试</td></tr>
+            <tr class="recommended"><td>1,000 MAU</td><td>约 2,933 小时</td><td>25 路</td><td>约 ¥4,446</td><td>约 ¥4.45</td><td>仍在默认 50 路内，ASR 是第一成本项</td></tr>
+            <tr><td>10,000 MAU</td><td>约 29,333 小时</td><td>245 路</td><td>约 ¥53,955</td><td>约 ¥5.40</td><td>额外 195 路并发约 ¥19,500/月，并发规划开始决定毛利</td></tr>
+          </tbody>
+        </table>
+        <p class="small muted">这是容量预算，不是报价。若真实用户不每天活跃、语音集中度更低、采用更大资源包或网关到火山不计公网出站，成本会下降；反之，企业用户集中在上午/下午同一时段时，并发成本会明显上升。</p>
+
+        <div class="grid-3">
+          <div class="card"><div class="metric">115.2 MB/h</div><div class="metric-label">16k × 16bit × mono PCM 的原始上行量（十进制）</div></div>
+          <div class="card"><div class="metric">≈¥0.09/h</div><div class="metric-label">若公网出站 ¥0.8/GB，网关→火山 PCM 流量上限估算</div></div>
+          <div class="card"><div class="metric">约 ¥0.0004</div><div class="metric-label">按计算器默认占位价的一次短句润色</div></div>
+        </div>
+        <p class="small muted">流量项按“全部 PCM 都作为收费公网出站”计算，是保守上限。若服务器与火山服务存在同地域内网地址、专线或不计费路径，实际成本会更低；正式预算必须由云账号账单规则和小流量实测确认，不能仅凭域名判断。计算器中的 LLM 输入/输出单价是可调占位假设，不是方舟正式报价；上线前按实际 Endpoint 对应模型的控制台/合同价替换。</p>
+
+        <div class="calculator" aria-label="成本计算器">
+          <div>
+            <h3>可调假设</h3>
+            <div class="form-grid">
+              <label>月活用户<input id="users" type="number" min="1" value="500"></label>
+              <label>每人每天语音分钟<input id="minutes" type="number" min="0" step="0.5" value="8"></label>
+              <label>每月活跃天数<input id="days" type="number" min="1" max="31" value="22"></label>
+              <label>每日集中使用时段（小时）<input id="activeHours" type="number" min="1" max="24" value="12"></label>
+              <label>峰值系数<input id="peakFactor" type="number" min="1" step="0.1" value="2.2"></label>
+              <label>ASR 单价（元/小时）<input id="asrPrice" type="number" min="0" step="0.01" value="0.9"></label>
+              <label>音频码率（kbps）<input id="bitrate" type="number" min="1" value="256"></label>
+              <label>公网出站（元/GB）<input id="trafficPrice" type="number" min="0" step="0.01" value="0.8"></label>
+              <label>每小时语音触发润色次数<input id="callsPerHour" type="number" min="0" value="30"></label>
+              <label>单次输入 token<input id="inputTokens" type="number" min="0" value="800"></label>
+              <label>单次输出 token<input id="outputTokens" type="number" min="0" value="120"></label>
+              <label>输入价（元/百万 token）<input id="inputPrice" type="number" min="0" step="0.1" value="0.2"></label>
+              <label>输出价（元/百万 token）<input id="outputPrice" type="number" min="0" step="0.1" value="2"></label>
+              <label>免费并发<input id="includedConcurrency" type="number" min="0" value="50"></label>
+              <label>并发增购（元/路/月）<input id="concurrencyPrice" type="number" min="0" value="100"></label>
+              <label>固定基础设施（元/月）<input id="infra" type="number" min="0" value="300"></label>
+            </div>
+          </div>
+          <div class="results" aria-live="polite">
+            <h3>月度成本估算</h3>
+            <div class="result-row"><span>语音时长</span><strong id="speechHours">—</strong></div>
+            <div class="result-row"><span>峰值并发</span><strong id="peakConcurrency">—</strong></div>
+            <div class="result-row"><span>ASR</span><strong id="asrCost">—</strong></div>
+            <div class="result-row"><span>网关公网流量</span><strong id="trafficCost">—</strong></div>
+            <div class="result-row"><span>LLM 润色</span><strong id="llmCost">—</strong></div>
+            <div class="result-row"><span>并发增购</span><strong id="concurrencyCost">—</strong></div>
+            <div class="result-row"><span>基础设施</span><strong id="infraCost">—</strong></div>
+            <div class="result-total" id="totalCost">—</div>
+            <div class="result-unit" id="perUser">—</div>
+          </div>
+        </div>
+
+        <details>
+          <summary>成本公式与解释</summary>
+          <div>
+            <ul>
+              <li>语音小时 = 月活 × 每天分钟 × 活跃天数 ÷ 60。</li>
+              <li>PCM 流量 = 小时 × 码率(kbps) × 3600 ÷ 8 ÷ 1,000,000；这里只计算网关向火山的公网出站，实际云厂商规则可能不同。</li>
+              <li>峰值并发 = 日语音小时 ÷ 集中使用时段 × 峰值系数，向上取整。</li>
+              <li>LLM = 润色次数 ×（输入 token × 输入价 + 输出 token × 输出价）÷ 1,000,000。</li>
+              <li>未包含支付通道、税费、客服、退款、风控损失和营销成本。</li>
+            </ul>
+          </div>
+        </details>
+
+        <h3>PCM 与 Opus 的取舍</h3>
+        <table class="decision">
+          <thead><tr><th>模式</th><th>流量</th><th>延迟/一致性</th><th>建议</th></tr></thead>
+          <tbody>
+            <tr class="recommended"><td>16k PCM</td><td>约 115.2MB/小时</td><td>不转码，最容易做到与当前直连一致</td><td><span class="badge">首版</span></td></tr>
+            <tr><td>24kbps Opus/Ogg</td><td>约 10.8MB/小时</td><td>显著省流量，但引入编码、封装、兼容性和少量延迟</td><td>流量成本超过总成本 10% 后再做受控实验</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="product">
+        <div class="section-kicker">14 / Product packaging</div>
+        <h2>用户体验应该是“安装即试用”，不是“安装后学习云控制台”</h2>
+
+        <div class="flow">
+          <div class="node"><b>安装并启动</b><span>自动创建匿名试用身份，无需注册、实名或填写 Key</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><b>授权系统权限</b><span>麦克风 + 辅助功能，马上完成第一句</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><b>试用结束再转化</b><span>剩余额度清晰可见，一键登录/购买后自动回到 App</span></div>
+        </div>
+
+        <h3>示例套餐，不建议做真正无限量</h3>
+        <table class="decision">
+          <thead><tr><th>套餐</th><th>示例价格</th><th>语音额度</th><th>适合人群</th><th>备注</th></tr></thead>
+          <tbody>
+            <tr><td>体验</td><td>免费</td><td>首次 30 分钟</td><td>验证权限、热键、识别质量</td><td>约 ¥0.65 的安全成本预算；设备/IP 风控</td></tr>
+            <tr><td>轻享</td><td>¥19/月</td><td>5 小时</td><td>偶尔回复消息、搜索和短文</td><td>超额可按分钟加购</td></tr>
+            <tr class="recommended"><td>专业</td><td>¥49/月</td><td>15 小时</td><td>约每天 30 分钟的办公与创作</td><td><span class="badge">主推</span> 为并发、支付、客服与退款留出空间</td></tr>
+            <tr><td>重度</td><td>¥129/月</td><td>50 小时</td><td>高频口述</td><td>避免“无限量”被脚本和共享账号击穿</td></tr>
+          </tbody>
+        </table>
+        <p class="small muted">价格必须用你的真实留存、平均分钟数、峰值并发和退款率重新计算。建议同时保留“高级 BYOK/本地 Ollama”作为开发者选项，但默认入口只展示托管服务。</p>
+
+        <h3>产品功能分层</h3>
+        <div class="grid-3">
+          <div class="card"><h4>默认托管</h4><p>零 Key、自动模型选择、统一额度、国内数据路径、最少设置。</p></div>
+          <div class="card"><h4>高级 BYOK</h4><p>开发者可继续直连自己的火山/LLM；明确标注由用户自行承担配置和费用。</p></div>
+          <div class="card"><h4>本地隐私模式</h4><p>后续接 FunASR/sherpa-onnx + Ollama，完全不上传，但不承诺等同火山效果。</p></div>
+        </div>
+      </section>
+
+      <section id="client">
+        <div class="section-kicker">15 / Client changes</div>
+        <h2>Viva 客户端改造清单</h2>
+
+        <table class="decision">
+          <thead><tr><th>文件</th><th>主要改动</th><th>风险</th></tr></thead>
+          <tbody>
+            <tr><td><code>Config.swift</code></td><td>新增 <code>serviceMode</code>、<code>backendBaseURL</code>、协议版本；托管模式不再保存火山/LLM Key；旧字段兼容迁移</td><td>迁移后清理旧明文密钥要可恢复、可确认</td></tr>
+            <tr><td>新增 <code>KeychainStore.swift</code></td><td>保存 refresh token 与设备私钥；access token 只在内存</td><td>Keychain 权限、升级与多副本 App 身份</td></tr>
+            <tr><td>新增 <code>BackendAuth.swift</code></td><td>bootstrap、refresh、设备签名、登录绑定、额度状态</td><td>离线/服务故障时不能卡死整个 App</td></tr>
+            <tr><td><code>DoubaoStreamingASR.swift</code></td><td>endpoint 改成自有 WSS；握手只带短 token；区分 gateway 文本控制帧和 SAUC binary 帧</td><td>握手诊断与火山 logid 获取方式需要重做</td></tr>
+            <tr><td><code>VoiceSession.swift</code></td><td><code>hasCredentials</code> 改为托管服务可用；本地 billedSeconds 仅显示估算；保留所有上屏与轮转逻辑</td><td>网络重连不能造成重复上屏</td></tr>
+            <tr><td><code>LLMPolisher.swift</code></td><td>托管模式调用 <code>/v1/text/polish</code>；不再上传任意模型地址/Key/system prompt；保留客户端结果护栏</td><td>兼容 SSE、取消、超时与原文回退</td></tr>
+            <tr><td><code>WelcomeView.swift</code></td><td>移除“填写火山 Key”；改成自动连接服务 → 麦克风 → 辅助功能 → 试一句</td><td>首次服务不可用时要允许稍后重试或进入 BYOK</td></tr>
+            <tr><td><code>SettingsView.swift</code></td><td>默认只展示账户、额度、质量档、隐私和退出登录；高级区保留 BYOK</td><td>避免把供应商复杂度重新泄漏给普通用户</td></tr>
+            <tr><td><code>Info.plist</code> / README</td><td>披露音频经过自有服务器并转发火山；文本润色的数据路径</td><td>文案必须与真实日志、存储和供应商一致</td></tr>
+          </tbody>
+        </table>
+
+        <h3>建议先抽象接口，再切换实现</h3>
+        <pre>protocol StreamingASRClient {
+    var onUpdate: ((ASRUpdate) -> Void)? { get set }
+    var onError: ((String) -> Void)? { get set }
+    var onFinished: ((String) -> Void)? { get set }
+    func start()
+    func send(audio: Data)
+    func finish()
+    func cancel()
+}
+
+// DirectDoubaoClient：保留现有 BYOK 路径
+// ManagedGatewayClient：默认托管路径
+// LocalASRClient：未来本地路径</pre>
+      </section>
+
+      <section id="tests">
+        <div class="section-kicker">16 / Experiments &amp; acceptance</div>
+        <h2>不要凭感觉宣布“和直连一样”，用同一段音频做逐帧 A/B</h2>
+
+        <table class="decision">
+          <thead><tr><th>实验</th><th>方法</th><th>通过条件</th></tr></thead>
+          <tbody>
+            <tr><td>协议黄金样本</td><td>保存首包、普通音频包、末包、asyncFinal、错误帧；对代理前后逐字节比较</td><td>managed client 默认整条消息一致；旧客户端兼容 rewrite 使用独立版本与黄金样本</td></tr>
+            <tr><td>直连 vs 代理</td><td>同一批 WAV 重放 30–100 次；记录 partial、definite、final、logid 与时间戳</td><td>最终文本无系统性差异；代理不丢 definite；额外延迟满足 SLO</td></tr>
+            <tr><td>热词/上下文</td><td>Claude Code、WebSocket、专有名词与连续对话测试</td><td>热词命中率与直连同档；上下文无 55000000</td></tr>
+            <tr><td>网络故障</td><td>模拟 50–300ms RTT、抖动、1% 丢包、断网和代理重连</td><td>不重复上屏、不产生孤儿计费、错误可理解</td></tr>
+            <tr><td>并发压测</td><td>成对 WebSocket 压测 10/50/100 并发，持续 30 分钟</td><td>无帧重排；p95 事件循环延迟受控；内存不线性失控</td></tr>
+            <tr><td>8 小时 soak</td><td>持续建立/结束短会话并穿插长会话轮转</td><td>连接数、goroutine、Redis lease、内存都能回落</td></tr>
+            <tr><td>LLM 护栏</td><td>问句、命令、长文本、Prompt 注入、空结果、截断和思维链泄漏</td><td>只润色不回答；失败总能回退原文</td></tr>
+          </tbody>
+        </table>
+
+        <h3>灰度开关</h3>
+        <ul class="checklist">
+          <li>远程配置按账号启用 managed gateway</li>
+          <li>客户端保留 direct/BYOK 回退至少两个版本周期</li>
+          <li>网关故障率、首字延迟或 5xx 超阈值时自动熔断</li>
+          <li>同一设备可一键导出匿名诊断包：版本、trace、logid、时间点，不含音频与全文</li>
+        </ul>
+      </section>
+
+      <section id="roadmap">
+        <div class="section-kicker">17 / Roadmap</div>
+        <h2>建议 6–10 周完成可收费版本</h2>
+        <div class="callout warn"><strong>编号说明：</strong>这里的 P0–P5 是产品排期视图，不替代交接包中的工程 M0–M7。编码 AI 必须按 M0→M7 顺序验收；P1 只有在 M1 Fake Upstream 协议 PoC 和 M2 认证完成后，才能进入 M3 真实火山联调。</div>
+        <div class="roadmap">
+          <div class="phase"><div class="time">WEEK 1</div><h3>P0 · 测量基线</h3><p>补齐客户端 trace；固化 20–30 段测试音频；记录直连 p50/p95、最终文本与所有边角帧。</p></div>
+          <div class="phase"><div class="time">WEEK 2–3</div><h3>P1 · 透明代理 MVP</h3><p>先以 Fake Upstream 完成 Go 双 WebSocket、首包校验和协议测试；M2 鉴权通过后再接真实火山 Secret、logid、并发与会话时长限制。</p></div>
+          <div class="phase"><div class="time">WEEK 3–4</div><h3>P2 · 客户端托管模式</h3><p>Keychain、bootstrap/refresh、ManagedGatewayClient、欢迎页零 Key 流程、BYOK 回退。</p></div>
+          <div class="phase"><div class="time">WEEK 4–5</div><h3>P3 · 额度与观测</h3><p>Postgres ledger、Redis 并发租约、管理页、Prometheus/Grafana、告警、用量对账。</p></div>
+          <div class="phase"><div class="time">WEEK 5–7</div><h3>P4 · 服务器端 LLM</h3><p>产品专用润色 API、mini 模型、Prompt 版本化、SSE、失败回退、内容与相似度护栏。</p></div>
+          <div class="phase"><div class="time">WEEK 7–10</div><h3>P5 · 商业化与高可用</h3><p>支付/激活、套餐、隐私与条款、双实例/LB、托管数据库、备份恢复、5%→100% 灰度。</p></div>
+        </div>
+      </section>
+
+      <section id="risks">
+        <div class="section-kicker">18 / Risks</div>
+        <h2>最容易低估的六个风险</h2>
+        <table class="decision">
+          <thead><tr><th>风险</th><th>概率/影响</th><th>对策</th></tr></thead>
+          <tbody>
+            <tr><td>默认 50 并发仍可能在集中办公时段触顶</td><td>中高 / 高</td><td>按活跃时段和峰值系数建模；Beta 前接入并发拒绝指标；提前申请扩容</td></tr>
+            <tr><td>匿名试用被逆向批量盗刷</td><td>高 / 高</td><td>额度小、设备签名、IP/ASN 风控、并发 1、异常版本封禁；付费必须绑定账户</td></tr>
+            <tr><td>中转网络比直连差</td><td>中 / 高</td><td>北京/上海/广州 A/B；连接复用；分段 trace；保留直连回退</td></tr>
+            <tr><td>代理改坏未公开协议细节</td><td>中 / 高</td><td>首版透明转发、黄金帧测试、原样保留 asyncFinal 和 close 时序</td></tr>
+            <tr><td>“隐私工具”变成中心化数据处理者</td><td>高 / 高</td><td>不落音频/全文、明确披露、国内默认、删除与注销、内部最小权限</td></tr>
+            <tr><td>订阅价覆盖不了重度用户</td><td>中 / 高</td><td>额度套餐而非无限量；超额包；按真实分钟数持续校准</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout"><strong>Go / No-Go 门槛：</strong>只有当代理对同一测试集的最终文本无系统性退化、中转新增 p95 ≤ 50ms、p99 ≤ 100ms、会话成功率 ≥ 99.9%、孤儿计费为 0、匿名试用滥用率可控，并已取得火山对集中托管/转供和目标并发容量的书面确认时，才把托管模式设为全量默认。</div>
+      </section>
+
+      <section id="sources">
+        <div class="section-kicker">19 / Sources</div>
+        <h2>主要资料来源</h2>
+        <ol class="sources">
+          <li><a href="https://docs.volcengine.com/docs/6561/1354869?lang=zh">火山引擎：流式语音识别 WebSocket</a> — <code>bigmodel_async</code>、鉴权头、200ms 分包、SAUC 帧与错误码。</li>
+          <li><a href="https://docs.volcengine.com/docs/6561/1359370?lang=zh">火山引擎：豆包语音计费说明</a> — 2.0 资源包、后付费、默认并发与并发增购。</li>
+          <li><a href="https://www.volcengine.com/docs/6893/1527759">火山引擎：边缘大模型网关 Realtime API</a> — 第二阶段统一事件协议参考。</li>
+          <li><a href="https://nginx.org/en/docs/http/websocket.html">NGINX：WebSocket proxying</a> — Upgrade/Connection 与默认 60 秒无数据超时。</li>
+          <li><a href="https://github.com/xinnan-tech/xiaozhi-esp32-server">xiaozhi-esp32-server</a> — 服务端接收音频、火山流式 ASR provider、LLM/TTS 管线。</li>
+          <li><a href="https://github.com/BerriAI/litellm">LiteLLM</a> 及其 <a href="https://github.com/BerriAI/litellm/blob/main/LICENSE">LICENSE</a> — 多模型网关、预算、虚拟 Key 与许可边界。</li>
+          <li><a href="https://github.com/QuantumNous/new-api">New API</a> — 用户、令牌、额度和计费功能；AGPL-3.0。</li>
+          <li><a href="https://github.com/HaujetZhao/CapsWriter-Offline">CapsWriter-Offline</a> — 客户端/服务端分离的语音输入案例。</li>
+          <li><a href="https://github.com/joewongjc/type4me">type4me</a>、<a href="https://github.com/mylxsw/typeflux">typeflux</a>、<a href="https://github.com/Open-Less/openless">OpenLess</a> — 火山协议、Swift/Rust 客户端与注入实践。</li>
+          <li><a href="https://github.com/modelscope/FunASR">FunASR</a>、<a href="https://github.com/k2-fsa/sherpa-onnx">sherpa-onnx</a> — 自托管/本地 ASR 备选。</li>
+          <li><a href="https://github.com/QuentinFuxa/WhisperLiveKit">WhisperLiveKit</a>、<a href="https://github.com/speaches-ai/speaches">Speaches</a> — 自建实时 ASR 与统一事件协议参考。</li>
+          <li><a href="https://www.cac.gov.cn/2021-08/20/c_1631050028355286.htm">中华人民共和国个人信息保护法</a>。</li>
+          <li><a href="https://www.cac.gov.cn/2023-07/13/c_1690898327029107.htm">生成式人工智能服务管理暂行办法</a>。</li>
+          <li>服务端实施交接：<a href="server-handoff/00-START-HERE.md">入口说明</a>、<a href="server-handoff/01-SERVER-IMPLEMENTATION-SPEC.md">完整规格</a>、<a href="server-handoff/openapi.yaml">OpenAPI</a>、<a href="server-handoff/asyncapi.yaml">AsyncAPI</a>、<a href="server-handoff/schema.sql">PostgreSQL Schema</a>。</li>
+          <li>随包客户端参考：<a href="client-reference/AudioCapture.swift">AudioCapture.swift</a>、<a href="client-reference/VoiceSession.swift">VoiceSession.swift</a>、<a href="client-reference/DoubaoStreamingASR.swift">DoubaoStreamingASR.swift</a>、<a href="client-reference/SaucProtocol.swift">SaucProtocol.swift</a>、<a href="client-reference/LLMPolisher.swift">LLMPolisher.swift</a>、<a href="client-reference/Config.swift">Config.swift</a>。</li>
+        </ol>
+        <div class="callout warn"><strong>价格与模型名会变化。</strong>本报告使用 2026-07-28 可见的公开资料与仓库状态，正式采购、定价和上线前需再次核对火山控制台合同价、并发额度、LLM 模型价格和各开源组件最新许可证。</div>
+      </section>
+    </main>
+  </div>
+
+  <footer>Viva 托管语音云部署方案 · 研究与架构建议，不包含真实生产密钥 · 2026-07-28</footer>
+  <button class="print-btn" type="button" onclick="window.print()">打印 / 导出 PDF</button>
+
+  <script>
+    const ids = ["users","minutes","days","activeHours","peakFactor","asrPrice","bitrate","trafficPrice","callsPerHour","inputTokens","outputTokens","inputPrice","outputPrice","includedConcurrency","concurrencyPrice","infra"];
+    const val = id => Math.max(0, Number(document.getElementById(id).value) || 0);
+    const money = n => "¥" + n.toLocaleString("zh-CN", {maximumFractionDigits: 2, minimumFractionDigits: 2});
+    const compact = n => n.toLocaleString("zh-CN", {maximumFractionDigits: 1});
+
+    function calculate() {
+      const users = val("users");
+      const minutes = val("minutes");
+      const days = val("days");
+      const speechHours = users * minutes * days / 60;
+      const dailyHours = users * minutes / 60;
+      const avgConcurrent = dailyHours / Math.max(1, val("activeHours"));
+      const peak = Math.ceil(avgConcurrent * Math.max(1, val("peakFactor")));
+      const asr = speechHours * val("asrPrice");
+      const trafficGB = speechHours * val("bitrate") * 3600 / 8 / 1000000;
+      const traffic = trafficGB * val("trafficPrice");
+      const calls = speechHours * val("callsPerHour");
+      const llmPerCall = (val("inputTokens") * val("inputPrice") + val("outputTokens") * val("outputPrice")) / 1000000;
+      const llm = calls * llmPerCall;
+      const concurrency = Math.max(0, peak - val("includedConcurrency")) * val("concurrencyPrice");
+      const infra = val("infra");
+      const total = asr + traffic + llm + concurrency + infra;
+
+      document.getElementById("speechHours").textContent = compact(speechHours) + " 小时";
+      document.getElementById("peakConcurrency").textContent = peak + " 路";
+      document.getElementById("asrCost").textContent = money(asr);
+      document.getElementById("trafficCost").textContent = money(traffic) + " / " + compact(trafficGB) + " GB";
+      document.getElementById("llmCost").textContent = money(llm) + " / " + compact(calls) + " 次";
+      document.getElementById("concurrencyCost").textContent = money(concurrency);
+      document.getElementById("infraCost").textContent = money(infra);
+      document.getElementById("totalCost").textContent = money(total);
+      document.getElementById("perUser").textContent = users > 0 ? "约 " + money(total / users) + " / 月活用户" : "";
+    }
+    ids.forEach(id => document.getElementById(id).addEventListener("input", calculate));
+    calculate();
+
+    const progress = document.getElementById("progress");
+    function updateProgress() {
+      const root = document.documentElement;
+      const max = root.scrollHeight - root.clientHeight;
+      progress.style.width = (max > 0 ? root.scrollTop / max * 100 : 0) + "%";
+    }
+    document.addEventListener("scroll", updateProgress, {passive: true});
+    updateProgress();
+  </script>
+</body>
+</html>

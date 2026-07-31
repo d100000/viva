@@ -14,7 +14,7 @@ cask "viva" do
 
   app "Viva.app"
 
-  # Viva 是 ad-hoc 签名（无 Apple 开发者证书，无法公证）。
+  # Viva 的默认发布包使用自签名而非 Apple Developer ID，尚未公证。
   # Homebrew 默认会给下载物打 quarantine，装完双击会被 Gatekeeper 拦下，
   # 提示「已损坏，应移到废纸篓」。这一行在安装后清掉隔离属性。
   postflight do
@@ -25,8 +25,8 @@ cask "viva" do
 
   uninstall quit: "com.local.viva"
 
-  # 配置和历史记录在 ~/.config/viva/，含 API Key。
-  # 放在 zap 而不是 uninstall —— 普通卸载/升级不该删掉用户的凭证，
+  # 配置、历史和日志在 ~/.config/viva/。
+  # 放在 zap 而不是 uninstall —— 普通卸载/升级不该删掉用户数据，
   # 只有显式 `brew uninstall --zap` 才清。
   zap trash: [
     "~/.config/viva",
@@ -41,7 +41,7 @@ cask "viva" do
       2. 辅助功能 —— 用于监听全局热键和把文字写进其它 App
                      授权后必须重启 Viva
 
-    还需要一个火山引擎豆包语音识别的 API Key，首次启动的引导会问你要。
+    首次启动用邮箱验证码注册或登录；不需要供应商 API Key。
 
     默认热键：按住右 ⌘ 说话。
   EOS

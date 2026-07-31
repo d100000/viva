@@ -20,6 +20,9 @@ final class VoiceSession {
     /// partial 和 definite 都过同一套规则 —— PartialCommitter 的前缀去重
     /// 要求两边文本一致，只替换一边会算错余额。
     private var replacer = TextReplacer(rules: [])
+    /// 用户热词 + 启用的预设词库热词（用户词优先），会话开始时快照一次。
+    /// 轮转（startASRClient 重入）直接复用，保证轮转前后参数一致。
+    private var effectiveHotwords: [String] = []
     /// 本次会话的有效配置 = 全局配置 + 目标 App 的 Profile 覆盖。
     /// 会话内一切行为（润色/上屏方式/逐段提交/去句号）都读它,不读全局 config ——
     /// 否则用户说话说到一半在设置页改配置会把会话行为撕裂。
@@ -62,7 +65,7 @@ final class VoiceSession {
     /// 录音时润色关（已逐句上屏）→ 收尾时润色开 → 再 inject 一遍全文（重复）；
     /// 或录音时润色开（内容全囤着）→ 收尾时润色关 → 谁都不 inject（整段丢失）。
     private var deferCommitSnapshot = false
-    /// begin() 时刻的 config.llmPassReady 快照。
+    /// begin() 时刻的 config.polishReady 快照。
     /// ⚠️ handleFinished 判断「要不要润色」必须用它，不能读实时 config ——
     ///   否则会话进行中用户点一下说话页的「AI 润色」胶囊，就会出现
     ///   「已经逐句上屏 + 松手后又把全文润色一遍整段粘一次」的重复注入，
@@ -71,7 +74,8 @@ final class VoiceSession {
     /// begin() 时刻的整份配置快照，专供润色使用。
     /// ⚠️ 必须和 polishSnapshot 同源。只快照「要不要润色」而让 LLMPolisher 拿实时 config，
     ///   会出现：会话中途关掉润色 → handleFinished 仍按快照进入 .polishing，
-    ///   但 LLMPolisher.isConfigured 读实时值判为 false，抛出服务配置错误。
+    ///   但 LLMPolisher.isConfigured 读实时值判为 false，抛出「润色未配置：缺少
+    ///   API Key 或模型名」—— 一条内容完全错误的红字，用户什么都没配错。
     private var polishConfigSnapshot: Config?
     /// 本次会话是否有任何一次上屏走了降级路径（Secure Input / 缺权限 / 前台切走）。
     /// 历史记录里的「仅复制」角标要靠它才准。
@@ -163,19 +167,19 @@ final class VoiceSession {
         // ⚠️ 下面这些 flash 一律用**参数** testMode 把关，不能用 self.testMode ——
         //   self.testMode 要等过了第一道 guard 才赋值（不能提前，否则会覆盖掉
         //   正在跑的上一轮会话的 testMode），在此之前它还是上一轮的残值。
-        //   试听模式全程不碰悬浮条：它面向的正是还没完成权限引导的新用户，
+        //   试听模式全程不碰悬浮条：它面向的正是还没授权、还没填 Key 的新用户，
         //   引导页下方已经有 WarnBanner 显示同一条错误，再浮一条黑胶囊是重复且突兀的。
         guard state == .idle else {
             if !testMode {
-                hud.flash(message: state == .polishing ? "正在处理上一段，稍候" : "正在收尾上一段，稍候",
+                hud.flash(message: state == .polishing ? "正在润色上一段，稍候" : "正在收尾上一段，稍候",
                           duration: 1.2)
             }
             return
         }
         self.testMode = testMode
 
-        guard config.hasValidBackendConfiguration else {
-            app.lastError = config.backendConfigurationError ?? "Viva 服务地址无效"
+        guard config.hasCredentials else {
+            app.lastError = "还没配置 API Key —— 去「设置」页填入"
             if !testMode { hud.flash(message: app.lastError, isError: true) }
             return
         }
@@ -194,17 +198,18 @@ final class VoiceSession {
         targetAppName = NSWorkspace.shared.frontmostApplication?.localizedName
         sessionConfig = config.applyingProfile(for: testMode ? nil : targetBundleId)
         if sessionConfig.enablePolish != config.enablePolish
-            || sessionConfig.enableCourseCorrection != config.enableCourseCorrection
             || sessionConfig.useClipboardPaste != config.useClipboardPaste
             || sessionConfig.progressiveCommit != config.progressiveCommit {
             Log.info("按 App Profile 生效：\(targetAppName ?? targetBundleId ?? "?")")
         }
 
-        // 润色或改口纠正任一开启 → 推迟上屏走 Viva 服务端大模型
+        // 润色或改口纠正,任一开启且凭证齐 → 推迟上屏走大模型
         polishSnapshot = sessionConfig.llmPassReady
         polishConfigSnapshot = sessionConfig
         replacer = TextReplacer(rules: WordlistStore.shared.mergedRules(
             user: sessionConfig.replaceRules, enabledLists: sessionConfig.enabledWordlists))
+        effectiveHotwords = WordlistStore.shared.mergedHotwords(
+            user: sessionConfig.hotwords, enabledLists: sessionConfig.enabledWordlists)
         deferCommitSnapshot = testMode || sessionConfig.commitOnlyAtEnd || polishSnapshot
         partialCommitter = (sessionConfig.progressiveCommit && !deferCommitSnapshot)
             ? PartialCommitter(config: sessionConfig) : nil
@@ -338,9 +343,19 @@ final class VoiceSession {
     // MARK: - 会话轮转
 
     /// 建一个新的 ASR 会话并接管 asr 引用。begin() 和 continueRotation 共用 ——
-    /// 每次都走同一条 ticket + SAUC 建连路径，轮转不会漏掉账户鉴权。
+    /// 首包参数（热词、判停窗口…）只有这一条代码路径，轮转不会漏配置。
     private func startASRClient() {
-        let client = DoubaoStreamingASR(config: sessionConfig)
+        // 预设词库热词并入直传 context（用户词在前，客户端 prefix(60) 截断）
+        var cfg = sessionConfig
+        cfg.hotwords = effectiveHotwords
+        let client = DoubaoStreamingASR(config: cfg)
+        // 对话上下文：最近几条识别结果（旧→新），帮服务端接住跨句语境。
+        // 只发本服务自己产出过的文本，不发 App 名等新增信息；试听模式不发。
+        if sessionConfig.enableDialogContext, !testMode {
+            client.dialogContext = Array(HistoryStore.shared.records.prefix(3)
+                .map { String(($0.polishedText ?? $0.text).prefix(100)) }
+                .reversed())
+        }
         client.onUpdate = { [weak self] u in
             Task { @MainActor in self?.handle(u) }
         }
@@ -485,7 +500,7 @@ final class VoiceSession {
         if partialCommitter != nil, !u.partial.isEmpty {
             let increment = partialCommitter!.feed(partialTail: u.partial)
             if !increment.isEmpty {
-                Log.debug("逐段提交 \(increment.count) 字")
+                Log.debug("逐段提交 \(increment.count) 字：\(increment)")
                 injectSentence(increment)
             }
         }
@@ -558,7 +573,6 @@ final class VoiceSession {
         }
 
         asr = nil
-        refreshManagedBalance()
         app.committed = committedText
         app.partial = ""
 
@@ -582,17 +596,18 @@ final class VoiceSession {
             return
         }
 
-        let cfg = polishConfigSnapshot ?? config
         state = .polishing
         onStateChange?(state)
         app.isPolishing = true
-        app.polishNote = "\(cfg.aiProcessingMode.processingLabel)…"
+        app.polishNote = "正在润色…"
         if !testMode {
             hud.setPhase(.polishing)
             hud.update(committed: raw, partial: "")
         }
 
         let pending = pendingCommit
+        let cfg = polishConfigSnapshot ?? config
+        let ctxApp = targetAppName
 
         polishTask = Task { @MainActor in
             do {
@@ -605,24 +620,24 @@ final class VoiceSession {
                     self.app.committed = partial
                     if !self.testMode { self.hud.update(committed: partial, partial: "") }
                 }
-                let r = try await polisher.polish(raw)
+                let r = try await polisher.polish(raw, contextApp: ctxApp)
                 // 用户可能在这 1~2 秒里按了 Esc。此时绝不能上屏，
                 // 更不能走 finishState —— 那会把新一轮录音打回 .idle。
                 guard !Task.isCancelled, self.state == .polishing else { return }
-                Log.info("AI 处理完成 \(r.elapsedMs)ms：\(raw.count) 字 → \(r.text.count) 字")
+                Log.info("润色完成 \(r.elapsedMs)ms：\(raw.count) 字 → \(r.text.count) 字")
                 self.applyPolish(raw: raw, polished: r.text, elapsedMs: r.elapsedMs)
             } catch {
                 // ⚠️ 这道 guard 不是冗余：Task.cancel() 会让 URLSession 抛错落到这里，
                 //    不判取消的话会走「退回原文上屏」，bug 一模一样地复现。
                 guard !Task.isCancelled, self.state == .polishing else { return }
-                Log.warn("AI 处理失败：\(error.localizedDescription)")
-                self.app.polishNote = "AI 处理失败，已使用原文"
+                Log.warn("润色失败：\(error.localizedDescription)")
+                self.app.polishNote = "润色失败，已使用原文"
                 // 失败绝不能丢内容 —— 退回原文照常上屏
                 if !self.testMode, !pending.isEmpty { self.injectWhole(pending) }
                 self.pendingCommit = ""
-                self.finalize(raw: raw, polished: nil, aiOutcome: .fallback)
+                self.finalize(raw: raw, polished: nil)
                 if !self.testMode {
-                    self.hud.flash(message: "AI 处理失败（\(error.localizedDescription)），已按原文上屏",
+                    self.hud.flash(message: "润色失败（\(error.localizedDescription)），已按原文上屏",
                                    isError: true, duration: 3)
                 }
             }
@@ -636,33 +651,24 @@ final class VoiceSession {
         // 「Cloth Code→Claude Code」这类规则在润色后同样该生效
         let polished = replacer.isEmpty ? rawPolished : replacer.apply(rawPolished)
         pendingCommit = ""
-        let mode = polishConfigSnapshot?.aiProcessingMode ?? .polish
-        let changed = raw != polished
-        app.polishNote = changed
-            ? "已\(mode.resultNoun)（\(elapsedMs)ms）"
-            : "已检查，未改动（\(elapsedMs)ms）"
+        // 提示语按实际开了什么说话:只开改口纠正时说「已润色」会让用户以为被改了风格
+        let noun = (polishConfigSnapshot?.enablePolish ?? true) ? "润色" : "改口修正"
+        app.polishNote = raw == polished ? "\(noun)无改动（\(elapsedMs)ms）" : "已\(noun)（\(elapsedMs)ms）"
         app.committed = displayed(polished)
 
         if testMode {
-            finalize(raw: raw, polished: polished,
-                     aiOutcome: changed ? .changed : .unchanged,
-                     aiElapsedMs: elapsedMs)
+            finalize(raw: raw, polished: polished)
             return
         }
         // 走到这里文字还没进目标 App，直接写润色后的版本 —— 不需要任何退格
         injectWhole(polished)
         hud.update(committed: displayed(polished), partial: "")
         hud.hide(after: 0.6)
-        finalize(raw: raw, polished: polished,
-                 aiOutcome: changed ? .changed : .unchanged,
-                 aiElapsedMs: elapsedMs)
+        finalize(raw: raw, polished: polished)
     }
 
     /// 落历史 + 复位状态
-    private func finalize(raw: String,
-                          polished: String?,
-                          aiOutcome: AIProcessingOutcome? = nil,
-                          aiElapsedMs: Int? = nil) {
+    private func finalize(raw: String, polished: String?) {
         polishTask = nil
         app.isPolishing = false
         if !raw.isEmpty {
@@ -674,10 +680,7 @@ final class VoiceSession {
                 appBundleId: testMode ? nil : targetBundleId,
                 appName: testMode ? "（试听）" : targetAppName,
                 injected: !testMode && !didFallbackToClipboard,
-                polishedText: polished,
-                aiMode: aiOutcome == nil ? nil : polishConfigSnapshot?.aiProcessingMode,
-                aiOutcome: aiOutcome,
-                aiElapsedMs: aiElapsedMs))
+                polishedText: polished))
         }
         finishState()
 
@@ -719,18 +722,6 @@ final class VoiceSession {
                       isError: true, duration: 4)
         } else {
             hud.flash(message: msg, isError: true, duration: 4)
-        }
-    }
-
-    /// ASR 的实际计费由服务端在会话结束时结算，不用本地音频秒数推测余额。
-    private func refreshManagedBalance() {
-        guard let baseURL = sessionConfig.backendBaseURL else { return }
-        Task {
-            do {
-                _ = try await ManagedBackendAuth.shared.balance(baseURL: baseURL)
-            } catch {
-                Log.warn("ASR 完成后刷新积分失败：\(error.localizedDescription)")
-            }
         }
     }
 

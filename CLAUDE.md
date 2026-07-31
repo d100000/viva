@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目是什么
 
-**Viva** —— macOS 语音输入工具。按住热键（默认右⌘）说话，音频推给火山引擎豆包流式语音识别 2.0，识别文字实时显示在悬浮条里，每说完一句自动注入到当前光标处。可选接大模型做二次润色。
+**Viva** —— macOS 语音输入工具。按住热键（默认右⌘）说话，音频经 Viva 托管网关识别，文字实时显示在悬浮条里，每说完一句自动注入到当前光标处。可选使用 Viva 服务端的大模型做二次润色。
 
 仓库根目录的 `01~08-*.md` 是调研/设计文档；可运行的代码全部在 `app/`。文档、注释、commit message 均使用中文（commit 格式：`fix:`/`feat:` + 中文描述）。
 
@@ -21,20 +21,25 @@ cd app && ./build.sh          # 产物: app/dist/Viva.app
 # 打发布包（DMG + ZIP，版本号自动从 Info.plist 读）
 cd app && ./package.sh        # 产物: app/dist/Viva-x.y.z.{dmg,zip}
 
-# 协议自检 —— 改动 ASR/协议相关代码后的首选验证方式（不需要任何系统权限）
-export DOUBAO_API_KEY=你的key
-say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的接入方案"
+# 本地服务联调 —— 不需要麦克风或辅助功能权限
+export VIVA_TEST_MODE=1
+export VIVA_TEST_BACKEND_URL=http://127.0.0.1:8080
+app/.build/release/Viva --account-selftest client-test@example.com
+
+# 保留本地测试会话后，再验证 ASR ticket、Gateway 与 SAUC
+VIVA_SELFTEST_KEEP_SESSION=1 app/.build/release/Viva --account-selftest client-asr@example.com
+say -o /tmp/t.aiff "今天下午三点开会，讨论语音输入的接入方案"
 app/.build/release/Viva --selftest /tmp/t.aiff
 
 # 运行 App / 看详细日志
 open app/dist/Viva.app
-DOUBAO_VERBOSE=1 app/dist/Viva.app/Contents/MacOS/Viva
+VIVA_VERBOSE=1 app/dist/Viva.app/Contents/MacOS/Viva
 
 # 测安装脚本（别用真 /Applications，拿沙盒 PREFIX 测）
 VIVA_PREFIX=$(mktemp -d) VIVA_ZIP=app/dist/Viva-0.4.0.zip ./install.sh
 ```
 
-没有测试目录、没有 lint 配置。验证手段就两个：`--selftest`（验协议/凭证/参数，不碰权限）和真机手测（麦克风/热键/上屏三条链路，需要用户授权，Claude 无法代测）。
+没有测试目录、没有 lint 配置。验证手段包括本地服务的 `--account-selftest` / `--selftest`（不碰系统权限）和真机手测（麦克风/热键/上屏三条链路，需要用户授权）。
 
 ## 发版流程
 
@@ -62,19 +67,20 @@ Swift Package（`app/Package.swift`，swift-tools 6.0 但强制 `.swiftLanguageM
 HotkeyManager(CGEventTap 捕获右⌘, 双击=锁定连续听写)
   → VoiceSession(状态机: idle→listening→finalizing→polishing)
       ├── AudioCapture      AVAudioEngine 采集 + 48k→16k 重采样 + 环形预缓冲(preRoll 防首字丢失)
-      ├── DoubaoStreamingASR WebSocket 客户端 ←→ SaucProtocol(豆包二进制协议编解码)
+      ├── ManagedBackendAuth 邮箱会话、Bearer/Refresh 与一次性 ASR ticket
+      ├── DoubaoStreamingASR Viva Gateway WebSocket 客户端 ←→ SaucProtocol(SAUC 二进制协议编解码)
       ├── PartialCommitter  连续听写: partial 稳定前缀逐段上屏(见 09 号方案, 润色时旁路)
       ├── TextReplacer      确定性替换(改词记忆): definite/partial 在 handle() 入口统一过规则
-      ├── WordlistStore     预设词库: 数据源=仓库根 wordlists/*.json, 构建时打进 Resources 兜底,
+      ├── WordlistStore     预设本地替换规则: 数据源=仓库根 wordlists/*.json, 构建时打进 Resources 兜底,
       │                     运行时每 24h 从 GitHub raw 拉新版缓存到 data/wordlists/(改仓库文件=全网生效)
       ├── PasteLastHotkey   ⌃⌥⌘V 全局粘贴上一段(Carbon RegisterEventHotKey, 无需任何权限)
-      ├── LLMPolisher       可选润色, 走 LLMProvider(各家 OpenAI 兼容预设) + APIFormat
+      ├── LLMPolisher       可选润色，走 Viva 产品接口与 Bearer/SSE
       ├── TextInjector      剪贴板+⌘V 或 CGEvent 逐字, 含 Secure Input 检测
       ├── HUDController     悬浮条, partial 逐字显示 / definite 定格
       └── HistoryStore      本地识别记录
 AppState(单例 ObservableObject) —— UI 只读它, 业务逻辑只写它
 MainWindow/SpeakView/SettingsView/HistoryView/StatsView/WelcomeView —— SwiftUI 界面
-main.swift —— 入口 + --selftest 模式
+main.swift —— 入口 + 账户/ASR 自检模式
 ```
 
 - **VoiceSession 与上屏方式解耦**：partial 只进 HUD，写进目标 App 的最小单位默认是一句（definite）；开了连续听写后，partial 里「标点收尾 + 连续多帧稳定 + 距尾部有安全边距」的前缀也会提前上屏（PartialCommitter，绝不退格的前提下宁漏勿错）。将来做输入法形态只需替换注入层。
@@ -87,25 +93,22 @@ main.swift —— 入口 + --selftest 模式
 
 ```
 ~/.config/viva/
-├── config.json     配置（API Key/热词/各项设置，权限 600，读取优先级：环境变量 > 文件 > 默认值）
+├── config.json     本地偏好与测试服务地址（权限 600，读取优先级：环境变量 > 文件 > 默认值）
 ├── data/           识别历史 history.json（Config.dataDir）
 ├── logs/           运行日志 viva.log（Config.logsDir）
 ├── crashes/        崩溃报告（CrashReporter.dirURL）
 └── signing/        代码签名证书备份 viva-signing.p12 + .pass（make-signing-cert.sh，勿删/勿入库）
 ```
 
-目录常量集中在 `Config.swift`（`configDir`/`dataDir`/`logsDir`）。改路径必须配迁移：`migrateLegacyIfNeeded()` 处理历代旧目录名（doubao-voice 等），`migrateLayoutIfNeeded()` 把旧版平铺的 history.json/viva.log 就地搬进 data//logs/（启动时自动、幂等）。API Key 绝不写进源码。
+目录常量集中在 `Config.swift`（`configDir`/`dataDir`/`logsDir`）。改路径必须配迁移：`migrateLegacyIfNeeded()` 处理历代旧目录名（doubao-voice 等），`migrateLayoutIfNeeded()` 把旧版平铺的 history.json/viva.log 就地搬进 data//logs/（启动时自动、幂等）。账户 Token 在 Keychain；旧版供应商凭证会在配置清理时移除。
 
 ## 实测得出的硬约束（改参数前必读，都是踩过坑的）
 
-- **`enableNonstream`（二遍识别）与热词互斥**（3/3 复现）：开启后 `corpus.context` 热词失效。默认关闭 —— 热词是本项目差异化支点，不能牺牲。
-- **`endWindowSize` 必须小于说话的自然停顿**（300~600ms 安全区），否则逐句上屏退化成说完才一次性上屏。
+- **客户端不再控制上游识别参数**：首包只发送最小 SAUC 协议字段；供应商、模型、判停、ITN/DDC、标点和上下文均由 Viva 服务端版本化管理。
+- **ASR 先申请一次性 ticket**：客户端不可自行拼接上游 WebSocket URL 或携带供应商凭证；Gateway 的 accepted/ready 控制事件到达后才能发送音频。
 - **热键别用 Fn(63)**：微信输入法和豆包输入法都抢占了它。
 - **全局热键只依赖「辅助功能」，不依赖「输入监控」**：Viva 的 `HotkeyManager` 使用 `CGEvent.tapCreate(..., options: .defaultTap)`，这条路径由辅助功能（`AXIsProcessTrusted()`）授权。绝不能再用 `CGPreflightListenEventAccess()` 作为热键启动、健康检查或设置页状态的硬门槛，也不要引导用户开启输入监控；否则会把可用热键误判成不可用。普通组合热键还可使用 `RegisterEventHotKey`，同样无需输入监控，但 Viva 为支持单修饰键、按住/松开时序和吞键而采用 `.defaultTap`。
-- **resourceId 用 `volc.seedasr.sauc.duration`（2.0，1元/小时）**；1.0 的 `volc.bigasr.sauc.duration` 贵 4.5 倍。
-- **dialog_ctx 的 `context_data` 元素必须是对象 `{"text": "…"}`**，传纯字符串数组服务端报 55000000 "fail to unmarshal corpusCtx"（实测得出，官方文档没写）。热词和 dialog_ctx 可共存于同一个 corpus.context 内层 JSON。验证方式：`VIVA_TEST_CTX=1 Viva --selftest 音频`。
 - **故意不做**退格回改已上屏文本 —— 算错一次会不可逆删掉用户自己的文字。
-- `LLMProvider.swift` 的服务商预设表是逐家核实官方文档得来的：各家关闭「深度思考」的参数写法都不同（`thinkingOff`），传错等于没关；模型名 churn 极快，一律做成可编辑字符串 + 建议列表，绝不写死。
 
 ## 已知坑
 
@@ -113,5 +116,4 @@ main.swift —— 入口 + --selftest 模式
 - **自签/ad-hoc 签名 ⇒ 无法公证 ⇒ 下载的包仍被 Gatekeeper 拦**，提示「已损坏」（误导人，其实只是没 Apple 证书链）。固定自签证书解决的是 TCC 重复授权，**不解决** Gatekeeper——那需要 Developer ID + 公证（$99/年，将来 `export VIVA_SIGN_IDENTITY="Developer ID Application: …"` 即可切换，build.sh 无需改）。所以 `install.sh` 和 cask 的 `postflight` 仍必须 `xattr -dr com.apple.quarantine`，这一步是承重的，删了用户就打不开 App。`spctl -a` 对本 App 永远返回 rejected，但 App 实际能正常启动 —— 别拿 spctl 当验证标准。
 - **`ditto -c -k` 别加 `--sequesterRsrc`**：那个参数是**生成** `__MACOSX/` 的元凶（Apple 公证文档里带它，那是给 notary service 用的）。本项目要给端用户干净的包，不加。
 - **`ps -eo comm=` 会按列宽截断路径**，只有 `ps -p <pid> -o comm=` 给完整路径；且它报物理路径（`/private/var/…`），跟符号链接路径比较前两边都要 `cd && pwd -P` 解析。install.sh 靠这个判断「该退掉的是不是正要被替换的那个进程」。
-- 豆包错误码：`45000001` 协议/参数非法；`45000081` 建连后太久没喂音频。排障带上启动时打印的 `logid`。**WebSocket 握手被拒时 URLSession 只报 badServerResponse、看不到状态码** —— DoubaoStreamingASR 会用同一套鉴权头发一次 HTTPS 探测分诊：401 `Invalid X-Api-Key`（key 错）/ 403 `resource not granted`（key 有效但没开通模型 2.0，新账号建了 key 不开通就是这个，最高频死路）。
-- `app/README.md` 部分内容仍是旧名「DoubaoVoiceInput」时期的（旧配置路径 `~/.config/doubao-voice` 等），以源码和根 README 为准。
+- Gateway 错误优先记录稳定错误码、request ID 和 upstream log ID；客户端不得探测或暴露供应商认证状态。

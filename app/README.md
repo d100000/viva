@@ -1,174 +1,113 @@
-# 豆包语音输入（macOS）
+# Viva 语音输入（macOS）
 
-按住右 ⌘ 说话，文字实时出现在光标处。对接火山引擎豆包流式语音识别。
+按住全局热键说话，松开后将识别结果写入当前光标。客户端只连接 Viva 托管服务，用户不需要申请或填写火山引擎与大模型 API Key。
 
-> 这是 [调研文档](../README.md) 里 **M0 + M1 + M2 骨架**的可运行实现。
-> 协议链路已实测跑通；麦克风/热键/上屏三条链路需要你授权后才能验证（见 §5）。
+## 1. 当前产品流程
 
----
+1. 用户输入邮箱并获取 6 位验证码。
+2. 新邮箱自动注册，已有邮箱直接登录。
+3. 客户端把 Access Token、轮换 Refresh Token、过期时间和设备 ID 作为单个原子值保存。带 Apple Team ID 的正式签名版本使用 macOS Keychain；没有 Team ID 的本地自签版本使用权限为 `0700/0600` 的本机会话文件，避免每次重编译都弹出系统密码框。
+4. 每次语音会话先用 Bearer Token 申请一次性 ASR ticket，再连接服务端返回的 WebSocket URL。
+5. 润色和改口纠正固定调用 Viva 产品级 LLM 接口；模型、Prompt、供应商地址和密钥只由服务端管理。
 
-## 1. 快速开始
+未登录时主窗口只显示账户入口。Refresh 失效、二次 401 或账号停用时，本地会话会被清理并回到登录页。
+
+## 2. 编译
+
+需要 macOS 14+、Apple Silicon 和 Command Line Tools：
 
 ```bash
 cd app
-./build.sh
+./build.sh release
 ```
 
-产物：`dist/豆包语音输入.app`
+产物：`dist/Viva.app`。Release 构建优先使用 `VIVA_SIGN_IDENTITY`，否则使用本机 `Viva Self-Signed` 固定证书；没有可用身份时直接失败，避免生成会反复丢失系统权限授权的 ad-hoc 客户包。只有 Debug 构建允许 ad-hoc 兜底。
 
-### 第一步：协议自检（不需要任何权限）⭐ 先做这个
+## 3. 本地联调
+
+先在 `viva-服务端` 项目启动单端口本地服务：
 
 ```bash
-export DOUBAO_API_KEY=你的火山APIKey
-say -o /tmp/t.aiff "今天下午三点开会，讨论豆包流式语音识别的接入方案"
-.build/release/DoubaoVoiceInput --selftest /tmp/t.aiff
+make run-local
 ```
 
-它会把音频当作麦克风推给豆包，打印每一条 partial / definite 及其到达时刻。
-**这一步能把「协议、凭证、参数」和「App 权限」两个风险源分开** —— 出问题时你能立刻知道是哪一边。
+默认 origin 是 `http://127.0.0.1:8080`。测试模式只接受 `localhost`、`127.0.0.0/8` 或 `::1` 的无路径 HTTP/HTTPS origin，不能用它指向任意第三方上游。
 
-### 第二步：配置
+### 账户、Refresh 和 LLM SSE 自检
+
+本地服务会在 OTP 响应中返回 `dev_code`；正式环境不会返回，因此该自检不得对生产运行。
 
 ```bash
-open ~/.config/doubao-voice/config.json
+VIVA_TEST_MODE=1 \
+VIVA_TEST_BACKEND_URL=http://127.0.0.1:8080 \
+.build/release/Viva --account-selftest client-test@example.com
 ```
 
-至少要填 `apiKey`。热词强烈建议填 —— 见 §3 的实测数据。
+该命令验证 OTP 注册/登录、强制 Refresh、`/v1/me`、积分余额、LLM SSE 和退出。它不会打印 OTP、Token 或 ticket。
 
-### 第三步：启动
+### ASR ticket 和 SAUC 自检
+
+先保留一份测试登录会话：
 
 ```bash
-open "dist/豆包语音输入.app"
+VIVA_TEST_MODE=1 \
+VIVA_TEST_BACKEND_URL=http://127.0.0.1:8080 \
+VIVA_SELFTEST_KEEP_SESSION=1 \
+.build/release/Viva --account-selftest client-asr-test@example.com
 ```
 
-首次启动会依次要两个权限：**麦克风** → **辅助功能**。授权辅助功能后**必须重启 App**。
+再把任意音频统一转为 16kHz/16bit/单声道 PCM 推给 Viva Gateway：
 
----
-
-## 2. 实测数据（本机 arm64 / macOS 26.5.2）
-
-用 `say` 合成的三句话、句间停顿 0.9s：
-
-| 指标 | 实测 |
-|---|---|
-| **首字返回** | **586 ~ 936 ms** |
-| definite 到达（3 句） | 2751 / 7774 / 11942 ms（`end_window_size=300`） |
-| | 3274 / 8431 / 11968 ms（`end_window_size=600`） |
-| | **11933 ms —— 只有一条**（`end_window_size=1500`） |
-
-### ⚠️ 最关键的一条约束
-
-> **`end_window_size` 必须小于你说话时的自然停顿，否则「边说边打字」直接退化成「说完才上屏」。**
-
-测试音频停顿是 900 ms。设成 1500 ms 时永远触发不了判停，三句话全憋到末包才一次性吐出来。
-
-真人口述换气通常 0.4–1.0 s，所以 **300~600 ms 是安全区**。默认给的是 600。
-
----
-
-## 3. ⚠️ `enable_nonstream` 与热词冲突（实测 3/3 复现）
-
-官方文档说二遍识别「既快又准」，但实测**开启后 `corpus.context` 的热词会失效**：
-
-| 说的内容 | `enableNonstream: true` | `enableNonstream: false` |
-|---|---|---|
-| 流式语音识别 | 流**是**语音识别 ❌ | 流**式**语音识别 ✅ |
-| Claude Code | **Cloth** Code ❌ | **Claude** code ✅ |
-| 上屏 | **尚平** ❌ | **上屏** ✅ |
-| ……的接入接口 | 句子完整 ✅ | **丢了句尾「接口」** ❌ |
-
-**权衡是真实的**：二遍识别在句子完整性和尾字上确实更好，但会丢热词。
-
-本项目默认 **`enableNonstream: false`** —— 热词是差异化支点，不能牺牲。
-如果你的场景没有专有名词，可以改成 `true` 换取更完整的句子。
-
----
-
-## 4. 配置项
-
-`~/.config/doubao-voice/config.json`（权限 600）
-
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `apiKey` | — | 新版控制台的 `x-api-key`。也可用环境变量 `DOUBAO_API_KEY` |
-| `appKey` / `accessKey` | — | 旧版控制台用这两个 |
-| `resourceId` | `volc.seedasr.sauc.duration` | 豆包流式 2.0（1 元/小时）。1.0 是 `volc.bigasr.sauc.duration`，贵 4.5 倍 |
-| `endpoint` | `.../api/v3/sauc/bigmodel_async` | 双向流式优化版 |
-| `endWindowSize` | `600` | ⭐ 见 §2。快嘴 300 / 默认 600 / 思考 1500（会丧失逐句上屏） |
-| `enableNonstream` | `false` | ⭐ 见 §3 |
-| `enableDdc` | `true` | 去「嗯」「那个」等口水词 |
-| `hotwords` | `[]` | ⭐ 专有名词识别率的最大杠杆，直传 `corpus.context`（限约 100 tokens） |
-| `hotkeyKeyCode` | `54`（右⌘） | ⚠️ **别用 Fn(63)**：微信输入法和豆包输入法都抢占了它 |
-| `preRollMs` | `400` | 环形预缓冲，解决首字丢失 |
-| `useClipboardPaste` | `true` | true=剪贴板+⌘V（兼容性最好）；false=CGEvent 逐字 |
-| `clipboardRestoreDelayMs` | `200` | iTerm2/Warp 会自动提到 1500 |
-| `commitOnlyAtEnd` | `false` | true = 不逐句上屏，松手才一次性写入 |
-
-改完在菜单栏点「重新加载配置」。
-
----
-
-## 5. 这个版本做到了什么 / 没做到什么
-
-### ✅ 已实测验证
-
-- 豆包 sauc 二进制协议（无序号路线：首包 `0b0000` / 音频包 `0b0000` / 末包 `0b0010`）
-- `volc.seedasr.sauc.duration`（**2.0**）确认支持 `bigmodel_async` + `show_utterances` + `definite`
-  （所有开源实现用的都是 1.0 的 `bigasr`，2.0 此前无人验证）
-- 逐句 definite 上屏的节奏
-- 热词直传生效，以及它与 `enable_nonstream` 的冲突
-- 首字延迟 ~600 ms
-
-### ⚠️ 需要你授权后才能验证（我无法代测）
-
-- 真实麦克风采集与 48k→16k 重采样
-- 环形预缓冲是否真的消除了首字丢失
-- CGEventTap 热键（长稳：跑 8 小时后是否还灵）
-- 文本注入到真实 App（备忘录 / Chrome / VS Code / 微信 / iTerm2）
-
-**这四条正是调研文档里 [M0.5 go/no-go 门槛](../06-实现路径与里程碑.md) 要求的冒烟测试。**
-
-### ❌ 明确没做
-
-- **逐字上屏到输入框**。partial 只在 HUD 里逐字显示，写进输入框的最小单位是**一句**。
-  真·逐字上屏需要 InputMethodKit 输入法形态，见 [04 章 §6](../04-技术实现方案.md)。
-- 退格回改已上屏文本 —— **故意不做**，算错一次就会不可逆地删掉用户自己的文字。
-- LLM 润色、场景 Profile、语音指令编辑、免提模式。
-
----
-
-## 6. 排障
-
-| 现象 | 原因 / 处理 |
-|---|---|
-| 启动后没反应，菜单栏没图标 | 卡在系统麦克风授权弹窗上，点「允许」 |
-| 热键按了没用 | 辅助功能权限。授权后**必须重启 App** |
-| **重新编译后热键突然失灵** | ⚠️ TCC 授权绑定代码签名，ad-hoc 签名每次编译都变。去「系统设置 → 隐私与安全性 → 辅助功能」把本 App **移除再重新添加** |
-| 文字没进输入框，提示「安全键盘输入」 | 密码框 / iTerm2 的 Secure Keyboard Entry 下无法注入，文本已复制，按 ⌘V |
-| `45000001` | 协议拼错或参数非法 |
-| `45000081` | 建连后太久没喂音频 |
-| 想看详细日志 | `DOUBAO_VERBOSE=1 "dist/豆包语音输入.app/Contents/MacOS/DoubaoVoiceInput"` |
-
-排障时把 `logid` 一起发给火山工单 —— 那是唯一线索，程序启动时会打印。
-
----
-
-## 7. 代码结构
-
-```
-Sources/DoubaoVoiceInput/
-├── main.swift              入口 + --selftest 自检模式
-├── AppDelegate.swift       菜单栏、权限引导、设置
-├── VoiceSession.swift      状态机：热键→采集→推流→上屏
-├── AudioCapture.swift      AVAudioEngine + 重采样 + 环形预缓冲
-├── DoubaoStreamingASR.swift WebSocket 客户端
-├── SaucProtocol.swift      二进制协议编解码
-├── HotkeyManager.swift     CGEventTap 右⌘，含 tap 静默禁用自愈
-├── TextInjector.swift      剪贴板+⌘V / CGEvent 逐字，含 Secure Input 检测
-├── HUDController.swift     悬浮窗，双态渲染
-├── Config.swift            配置
-└── Data+Gzip.swift         gzip 安全网
+```bash
+say -o /tmp/viva-test.aiff "今天下午三点开会"
+VIVA_TEST_MODE=1 \
+VIVA_TEST_BACKEND_URL=http://127.0.0.1:8080 \
+VIVA_VERBOSE=1 \
+.build/release/Viva --selftest /tmp/viva-test.aiff
 ```
 
-`VoiceSession` 与上屏方式解耦。将来做输入法版本，只需把「HUD 显示 partial / 注入 definite」
-换成「`setMarkedText` / `insertText`」，上游一行不用改。
+自检应依次看到 ticket 申请、`gateway.session.accepted`、`gateway.upstream.ready`、partial、definite/final 和 upstream log ID。
+
+## 4. 客户端配置边界
+
+普通用户可配置：
+
+- 热键、麦克风、预缓冲和上屏方式；
+- 本地改词记忆与预设替换规则；
+- 是否启用润色、改口纠正和 SSE 过程显示；
+- 自动更新、历史与隐私设置。
+
+客户端不允许配置：
+
+- 火山引擎或 LLM API Key；
+- 语音/模型供应商、模型名、Prompt 或上游地址；
+- 服务端当前不接收的热词、dialog context、判停、ITN/DDC/标点、繁体、首字加速或 nonstream 参数。
+
+“开发者选项”默认折叠，仅在本地联调时允许切换 loopback Viva origin。
+
+## 5. 协议与安全要点
+
+- 受保护 REST 请求使用 `Authorization: Bearer <access_token>`。
+- Refresh Token 每次使用后都必须轮换；同一 origin 的并发 401 只允许一个 Refresh 请求。
+- Refresh 网络重试复用持久化的 `Idempotency-Key`，避免触发 reuse detection。
+- ASR ticket 一次性使用、不持久化、不写日志；WebSocket 不携带长期 Authorization。
+- 服务端响应错误按 HTTP 状态码和稳定 `error.code` 处理，日志只记录 request ID 和错误码。
+- 音频、转写正文、OTP、Token、ticket 和供应商密钥不进入客户端请求日志。
+
+## 6. 代码结构
+
+```text
+Sources/Viva/
+├── AccountView.swift            邮箱 OTP 注册/登录、积分与退出
+├── ManagedBackendAuth.swift     Bearer、Refresh 轮换、登录状态存储与 ASR ticket
+├── DoubaoStreamingASR.swift     Viva Gateway WebSocket + SAUC
+├── LLMPolisher.swift            产品级润色 JSON/SSE 客户端
+├── VoiceSession.swift           采集、识别、润色、上屏状态机
+├── Config.swift                 固定生产 origin 与 loopback 测试 origin
+├── SettingsView.swift           账户和客户端行为设置
+└── main.swift                   App 入口与账户/ASR 自检
+```
+
+## 7. 生产服务
+
+`Config.productionBackendBaseURL` 固定为 `https://viva.bobdong.cn`。正式账户、语音识别 WebSocket 和大模型请求均从该受信任 origin 派生；本地测试模式仍只接受 loopback origin。

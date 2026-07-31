@@ -1,7 +1,8 @@
 import Foundation
 
 enum Log {
-    static var verbose = ProcessInfo.processInfo.environment["DOUBAO_VERBOSE"] != nil
+    static var verbose = ProcessInfo.processInfo.environment["VIVA_VERBOSE"] != nil
+        || ProcessInfo.processInfo.environment["DOUBAO_VERBOSE"] != nil // 兼容旧调试脚本
 
     static let fileURL = Config.logsDir.appendingPathComponent("viva.log")
 
@@ -28,16 +29,21 @@ enum Log {
         let dir = fileURL.deletingLastPathComponent()
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
             let attributes = try? fm.attributesOfItem(atPath: fileURL.path)
             if let size = attributes?[.size] as? NSNumber,
                size.uint64Value >= maxFileBytes {
                 let previous = dir.appendingPathComponent("viva.previous.log")
                 try? fm.removeItem(at: previous)
                 try fm.moveItem(at: fileURL, to: previous)
+                try? fm.setAttributes([.posixPermissions: 0o600],
+                                      ofItemAtPath: previous.path)
             }
             if !fm.fileExists(atPath: fileURL.path) {
                 _ = fm.createFile(atPath: fileURL.path, contents: nil)
             }
+            try? fm.setAttributes([.posixPermissions: 0o600],
+                                  ofItemAtPath: fileURL.path)
             let handle = try FileHandle(forWritingTo: fileURL)
             try handle.seekToEnd()
             try handle.write(contentsOf: line)
