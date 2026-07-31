@@ -608,9 +608,16 @@ final class VoiceSession {
                 let r = try await polisher.polish(raw)
                 // 用户可能在这 1~2 秒里按了 Esc。此时绝不能上屏，
                 // 更不能走 finishState —— 那会把新一轮录音打回 .idle。
-                guard !Task.isCancelled, self.state == .polishing else { return }
+                guard !Task.isCancelled, self.state == .polishing else {
+                    self.reportLLMClientOutcome(requestID: r.requestID,
+                                                outcome: "cancelled",
+                                                detail: "cancelled_before_apply",
+                                                elapsedMs: r.elapsedMs)
+                    return
+                }
                 Log.info("AI 处理完成 \(r.elapsedMs)ms：\(raw.count) 字 → \(r.text.count) 字")
-                self.applyPolish(raw: raw, polished: r.text, elapsedMs: r.elapsedMs)
+                self.applyPolish(raw: raw, polished: r.text, elapsedMs: r.elapsedMs,
+                                 requestID: r.requestID)
             } catch {
                 // ⚠️ 这道 guard 不是冗余：Task.cancel() 会让 URLSession 抛错落到这里，
                 //    不判取消的话会走「退回原文上屏」，bug 一模一样地复现。
@@ -630,7 +637,8 @@ final class VoiceSession {
     }
 
     /// 润色成功 → 一次性上屏
-    private func applyPolish(raw: String, polished rawPolished: String, elapsedMs: Int) {
+    private func applyPolish(raw: String, polished rawPolished: String, elapsedMs: Int,
+                             requestID: String?) {
         guard state == .polishing else { return }      // 兜底：已取消就不做任何事
         // 润色是 LLM 重写的新文本，没走过 handle() 的替换入口，这里补一遍 ——
         // 「Cloth Code→Claude Code」这类规则在润色后同样该生效
@@ -651,11 +659,28 @@ final class VoiceSession {
         }
         // 走到这里文字还没进目标 App，直接写润色后的版本 —— 不需要任何退格
         injectWhole(polished)
+        reportLLMClientOutcome(requestID: requestID, outcome: "applied",
+                               detail: didFallbackToClipboard
+                                   ? "applied_via_clipboard_fallback"
+                                   : "applied_to_target_app",
+                               elapsedMs: elapsedMs)
         hud.update(committed: displayed(polished), partial: "")
         hud.hide(after: 0.6)
         finalize(raw: raw, polished: polished,
                  aiOutcome: changed ? .changed : .unchanged,
                  aiElapsedMs: elapsedMs)
+    }
+
+    private func reportLLMClientOutcome(requestID: String?, outcome: String,
+                                        detail: String, elapsedMs: Int) {
+        guard let requestID, !requestID.isEmpty,
+              let baseURL = (polishConfigSnapshot ?? config).backendBaseURL else { return }
+        Task.detached(priority: .utility) {
+            try? await ManagedBackendAuth.shared.reportLLMOutcome(
+                requestID: requestID, outcome: outcome, detail: detail,
+                clientElapsedMS: elapsedMs, timeoutBudgetMS: 0,
+                baseURL: baseURL)
+        }
     }
 
     /// 落历史 + 复位状态

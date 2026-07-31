@@ -11,6 +11,7 @@ struct ManagedBackendSession: Sendable {
 }
 
 enum ManagedAuthPurpose: String, Codable, Sendable {
+    case loginOrRegister = "login_or_register"
     case register
     case login
     case recentAuth = "recent_auth"
@@ -39,7 +40,13 @@ struct ManagedAccountUser: Codable, Equatable, Sendable {
     let clientDeviceModel: String?
     let locale: String?
     let timezone: String?
+    let passwordUpdatedAt: String?
     let createdAt: String
+
+    var hasPassword: Bool {
+        guard let passwordUpdatedAt else { return false }
+        return !passwordUpdatedAt.hasPrefix("0001-")
+    }
 }
 
 struct ManagedWallet: Codable, Equatable, Sendable {
@@ -65,6 +72,7 @@ struct ManagedCreditBalance: Codable, Equatable, Sendable {
 
 struct ManagedOTPChallenge: Equatable, Sendable {
     let status: String
+    let challengeID: String?
     let expiresAt: Date
     /// Legacy decode compatibility only. The current server never returns OTP plaintext.
     let developerCode: String?
@@ -220,8 +228,13 @@ actor ManagedBackendAuth: VivaAccountClient {
         }
     }
 
+    private struct LLMClientOutcomeResponse: Decodable, Sendable {
+        let status: String
+    }
+
     private struct OTPResponse: Decodable {
         let status: String
+        let challengeId: String?
         let expiresAt: String
         let devCode: String?
     }
@@ -239,6 +252,20 @@ actor ManagedBackendAuth: VivaAccountClient {
         let accessToken: String
         let refreshToken: String
         let expiresAt: String
+    }
+
+    private struct PasswordLoginRequest: Encodable {
+        let email: String
+        let password: String
+        let deviceID: String
+    }
+
+    private struct PasswordSetupRequest: Encodable {
+        let email: String
+        let password: String
+        let code: String
+        let challengeID: String
+        let deviceID: String
     }
 
     private struct ASRTicketResponse: Decodable {
@@ -303,16 +330,33 @@ actor ManagedBackendAuth: VivaAccountClient {
         return Self.accountProfile(user: snapshot.user, wallet: snapshot.balance.wallet)
     }
 
-    func requestOTP(email: String) async throws -> VivaOTPDelivery {
-        let challenge = try await requestOTP(email: email, purpose: .login,
+    func requestOTP(email: String, purpose: ManagedAuthPurpose) async throws -> VivaOTPDelivery {
+        let challenge = try await requestOTP(email: email, purpose: purpose,
                                              baseURL: configuredBaseURL())
         return VivaOTPDelivery(resendAfterSeconds: 60,
+                               challengeID: challenge.challengeID,
                                developerCode: challenge.developerCode)
     }
 
-    func verifyOTP(email: String, code: String) async throws -> VivaAccountProfile {
+    func verifyOTP(email: String, code: String,
+                   challengeID: String?) async throws -> VivaAccountProfile {
         let verification = try await verifyOTP(email: email, code: code,
+                                               challengeID: challengeID,
                                                baseURL: configuredBaseURL())
+        return Self.accountProfile(user: verification.user, wallet: verification.wallet)
+    }
+
+    func loginWithPassword(email: String, password: String) async throws -> VivaAccountProfile {
+        let verification = try await loginWithPassword(
+            email: email, password: password, baseURL: configuredBaseURL())
+        return Self.accountProfile(user: verification.user, wallet: verification.wallet)
+    }
+
+    func setupPassword(email: String, password: String, code: String,
+                       challengeID: String) async throws -> VivaAccountProfile {
+        let verification = try await setupPassword(
+            email: email, password: password, code: code,
+            challengeID: challengeID, baseURL: configuredBaseURL())
         return Self.accountProfile(user: verification.user, wallet: verification.wallet)
     }
 
@@ -353,12 +397,14 @@ actor ManagedBackendAuth: VivaAccountClient {
         guard let expiresAt = Self.parseDate(response.expiresAt) else {
             throw AuthError.invalidResponse
         }
-        return ManagedOTPChallenge(status: response.status, expiresAt: expiresAt,
+        return ManagedOTPChallenge(status: response.status,
+                                   challengeID: response.challengeId,
+                                   expiresAt: expiresAt,
                                    developerCode: response.devCode)
     }
 
     @discardableResult
-    func verifyOTP(email: String, code: String,
+    func verifyOTP(email: String, code: String, challengeID: String? = nil,
                    baseURL: URL) async throws -> ManagedOTPVerification {
         let normalizedEmail = try Self.normalizedEmail(email)
         let normalizedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -366,14 +412,64 @@ actor ManagedBackendAuth: VivaAccountClient {
             throw AuthError.invalidInput("请输入 6 位数字验证码")
         }
         let localDeviceID = try stableDeviceID()
-        let body = try networkEncoder.encode([
+        var payload = [
             "email": normalizedEmail,
             "code": normalizedCode,
             "device_id": localDeviceID,
-        ])
+        ]
+        if let challengeID, !challengeID.isEmpty {
+            payload["challenge_id"] = challengeID
+        }
+        let body = try networkEncoder.encode(payload)
         let response: OTPVerifyResponse = try await send(path: "/v1/auth/otp/verify",
                                                          method: "POST", body: body,
                                                          baseURL: baseURL)
+        return try await persistAuthentication(response, localDeviceID: localDeviceID,
+                                               baseURL: baseURL)
+    }
+
+    @discardableResult
+    func loginWithPassword(email: String, password: String,
+                           baseURL: URL) async throws -> ManagedOTPVerification {
+        let normalizedEmail = try Self.normalizedEmail(email)
+        guard !password.isEmpty, password.count <= 128 else {
+            throw AuthError.invalidInput("请输入账号密码")
+        }
+        let localDeviceID = try stableDeviceID()
+        let body = try networkEncoder.encode(PasswordLoginRequest(
+            email: normalizedEmail, password: password, deviceID: localDeviceID))
+        let response: OTPVerifyResponse = try await send(
+            path: "/v1/auth/password/login", method: "POST", body: body,
+            baseURL: baseURL)
+        return try await persistAuthentication(response, localDeviceID: localDeviceID,
+                                               baseURL: baseURL)
+    }
+
+    @discardableResult
+    func setupPassword(email: String, password: String, code: String,
+                       challengeID: String,
+                       baseURL: URL) async throws -> ManagedOTPVerification {
+        let normalizedEmail = try Self.normalizedEmail(email)
+        try Self.validateNewPassword(password, email: normalizedEmail)
+        let normalizedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedCode.count == 6, normalizedCode.allSatisfy(\.isNumber),
+              UUID(uuidString: challengeID) != nil else {
+            throw AuthError.invalidInput("请输入 6 位数字验证码")
+        }
+        let localDeviceID = try stableDeviceID()
+        let body = try networkEncoder.encode(PasswordSetupRequest(
+            email: normalizedEmail, password: password, code: normalizedCode,
+            challengeID: challengeID, deviceID: localDeviceID))
+        let response: OTPVerifyResponse = try await send(
+            path: "/v1/auth/password/setup", method: "POST", body: body,
+            baseURL: baseURL)
+        return try await persistAuthentication(response, localDeviceID: localDeviceID,
+                                               baseURL: baseURL)
+    }
+
+    private func persistAuthentication(_ response: OTPVerifyResponse,
+                                       localDeviceID: String,
+                                       baseURL: URL) async throws -> ManagedOTPVerification {
         guard let expiresAt = Self.parseDate(response.expiresAt),
               !response.accessToken.isEmpty, !response.refreshToken.isEmpty else {
             throw AuthError.invalidResponse
@@ -544,6 +640,32 @@ actor ManagedBackendAuth: VivaAccountClient {
     func recordAvailablePoints(_ value: Int64, baseURL: URL) async throws {
         let origin = try originString(baseURL)
         await state.availablePointsUpdated(origin: origin, availablePoints: value)
+    }
+
+    /// Reports what happened after the server wrote an LLM response. Provider
+    /// success and actual user-visible application are different outcomes, so
+    /// this callback is intentionally best-effort and never affects dictation.
+    func reportLLMOutcome(requestID: String, outcome: String, detail: String,
+                          clientElapsedMS: Int, timeoutBudgetMS: Int,
+                          baseURL: URL) async throws {
+        let normalizedID = requestID.lowercased()
+        guard normalizedID.count == 36, UUID(uuidString: normalizedID) != nil else {
+            throw AuthError.invalidInput("大模型请求标识无效")
+        }
+        let allowedOutcomes = ["received", "applied", "fallback", "timeout", "cancelled", "rejected"]
+        guard allowedOutcomes.contains(outcome) else {
+            throw AuthError.invalidInput("大模型客户端结果无效")
+        }
+        let payload: [String: Any] = [
+            "outcome": outcome,
+            "detail": String(detail.prefix(160)),
+            "client_elapsed_ms": max(0, min(clientElapsedMS, 10 * 60 * 1000)),
+            "timeout_budget_ms": max(0, min(timeoutBudgetMS, 120_000)),
+        ]
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let _: LLMClientOutcomeResponse = try await authorized(
+            path: "/v1/llm-requests/\(normalizedID)/client-outcome",
+            method: "POST", body: body, baseURL: baseURL)
     }
 
     @discardableResult
@@ -943,6 +1065,19 @@ actor ManagedBackendAuth: VivaAccountClient {
         return value
     }
 
+    private static func validateNewPassword(_ password: String, email: String) throws {
+        guard password.count >= 15, password.count <= 128,
+              !password.contains("\n"), !password.contains("\r"),
+              !password.contains("\0") else {
+            throw AuthError.invalidInput("密码需为 15–128 个字符")
+        }
+        let localPart = email.split(separator: "@", maxSplits: 1).first.map(String.init) ?? ""
+        if localPart.count >= 3,
+           password.localizedCaseInsensitiveContains(localPart) {
+            throw AuthError.invalidInput("密码不能包含邮箱 @ 前的账号部分")
+        }
+    }
+
     private static func parseDate(_ raw: String) -> Date? {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -952,7 +1087,8 @@ actor ManagedBackendAuth: VivaAccountClient {
 
     private static func accountProfile(user: ManagedAccountUser,
                                        wallet: ManagedWallet) -> VivaAccountProfile {
-        VivaAccountProfile(email: user.email ?? "", credits: wallet.availablePoints)
+        VivaAccountProfile(email: user.email ?? "", credits: wallet.availablePoints,
+                           hasPassword: user.hasPassword)
     }
 
     private static var clientVersion: String {

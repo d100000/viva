@@ -3,14 +3,24 @@ import SwiftUI
 struct VivaAccountProfile: Equatable, Sendable {
     let email: String
     let credits: Int64
+    let hasPassword: Bool
+
+    init(email: String, credits: Int64, hasPassword: Bool = false) {
+        self.email = email
+        self.credits = credits
+        self.hasPassword = hasPassword
+    }
 }
 
 struct VivaOTPDelivery: Equatable, Sendable {
     let resendAfterSeconds: Int
+    let challengeID: String?
     let developerCode: String?
 
-    init(resendAfterSeconds: Int = 60, developerCode: String? = nil) {
+    init(resendAfterSeconds: Int = 60, challengeID: String? = nil,
+         developerCode: String? = nil) {
         self.resendAfterSeconds = resendAfterSeconds
+        self.challengeID = challengeID
         self.developerCode = developerCode
     }
 }
@@ -19,8 +29,12 @@ struct VivaOTPDelivery: Equatable, Sendable {
 /// server account endpoints are available without coupling this view to HTTP.
 protocol VivaAccountClient: Sendable {
     func restore() async throws -> VivaAccountProfile?
-    func requestOTP(email: String) async throws -> VivaOTPDelivery
-    func verifyOTP(email: String, code: String) async throws -> VivaAccountProfile
+    func requestOTP(email: String, purpose: ManagedAuthPurpose) async throws -> VivaOTPDelivery
+    func verifyOTP(email: String, code: String,
+                   challengeID: String?) async throws -> VivaAccountProfile
+    func loginWithPassword(email: String, password: String) async throws -> VivaAccountProfile
+    func setupPassword(email: String, password: String, code: String,
+                       challengeID: String) async throws -> VivaAccountProfile
     func refreshProfile() async throws -> VivaAccountProfile
     func logout() async throws
 }
@@ -39,7 +53,7 @@ struct AccountAccessView: View {
                 VStack(spacing: AccountViewMetrics.titleSpacing) {
                     Text("登录 Viva")
                         .font(.system(size: 24, weight: .semibold, design: .rounded))
-                    Text("使用邮箱验证码登录；新邮箱会自动创建账户。")
+                    Text("支持邮箱验证码或账号密码登录。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -211,6 +225,7 @@ struct VivaServiceRoutingView: View {
 struct AccountView: View {
     @StateObject private var model: VivaAccountViewModel
     @State private var confirmsLogout = false
+    @State private var revealsPassword = false
 
     init(client: any VivaAccountClient,
          showsDeveloperCode: Bool = false,
@@ -256,11 +271,36 @@ struct AccountView: View {
 
     @ViewBuilder
     private var signedOutContent: some View {
-        switch model.stage {
-        case .email:
-            emailEntry
-        case .verification:
+        if model.stage == .verification {
             verificationEntry
+        } else if model.isSettingUpPassword {
+            passwordSetupEntry
+        } else {
+            loginEntry
+        }
+    }
+
+    private var loginEntry: some View {
+        VStack(alignment: .leading, spacing: AccountViewMetrics.sectionSpacing) {
+            Picker("登录方式", selection: $model.signInMethod) {
+                ForEach(VivaAccountViewModel.SignInMethod.allCases) { method in
+                    Text(method.title).tag(method)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(model.isBusy)
+            .onChange(of: model.signInMethod) { _, _ in
+                revealsPassword = false
+                model.signInMethodDidChange()
+            }
+
+            switch model.signInMethod {
+            case .otp:
+                emailEntry
+            case .password:
+                passwordLoginEntry
+            }
         }
     }
 
@@ -269,13 +309,14 @@ struct AccountView: View {
             AccountLabeledRow("邮箱") {
                 TextField("name@example.com", text: $model.email)
                     .textFieldStyle(.roundedBorder)
+                    .textContentType(.username)
                     .disabled(model.isBusy)
                     .onChange(of: model.email) { _, _ in
                         model.emailDidChange()
                     }
                     .onSubmit {
                         guard model.canRequestOTP else { return }
-                        Task { await model.requestOTP() }
+                        Task { await model.requestOTP(purpose: .loginOrRegister) }
                     }
             }
 
@@ -286,7 +327,7 @@ struct AccountView: View {
 
             HStack {
                 Button {
-                    Task { await model.requestOTP() }
+                    Task { await model.requestOTP(purpose: .loginOrRegister) }
                 } label: {
                     operationLabel(isRunning: model.isRequestingOTP,
                                    title: "发送验证码",
@@ -296,6 +337,135 @@ struct AccountView: View {
                 .disabled(!model.canRequestOTP)
 
                 Spacer()
+            }
+        }
+    }
+
+    private var passwordLoginEntry: some View {
+        VStack(alignment: .leading, spacing: AccountViewMetrics.rowSpacing) {
+            AccountLabeledRow("邮箱") {
+                TextField("name@example.com", text: $model.email)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.username)
+                    .disabled(model.isBusy)
+                    .onChange(of: model.email) { _, _ in model.emailDidChange() }
+            }
+
+            passwordRow(label: "密码", text: $model.password)
+                .onSubmit {
+                    guard model.canLoginWithPassword else { return }
+                    Task { await model.loginWithPassword() }
+                }
+
+            HStack(spacing: AccountViewMetrics.inlineSpacing) {
+                Button {
+                    Task { await model.loginWithPassword() }
+                } label: {
+                    operationLabel(isRunning: model.isPasswordLogin,
+                                   title: "登录",
+                                   systemImage: "arrow.right.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canLoginWithPassword)
+
+                Button("忘记密码") {
+                    revealsPassword = false
+                    model.beginPasswordSetup(.recovery)
+                }
+                .disabled(model.isBusy)
+
+                Spacer()
+            }
+
+            HStack(spacing: AccountViewMetrics.inlineSpacing) {
+                Text("还没有账号？")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    revealsPassword = false
+                    model.beginPasswordSetup(.registration)
+                } label: {
+                    Label("注册账号", systemImage: "person.badge.plus")
+                }
+                .buttonStyle(.link)
+                .disabled(model.isBusy)
+                Spacer()
+            }
+        }
+    }
+
+    private var passwordSetupEntry: some View {
+        VStack(alignment: .leading, spacing: AccountViewMetrics.rowSpacing) {
+            HStack {
+                Label(model.passwordSetupTitle,
+                      systemImage: model.isRecoveringPassword ? "key" : "person.badge.plus")
+                    .font(.callout.weight(.medium))
+                Spacer()
+                Button("返回登录") {
+                    revealsPassword = false
+                    model.cancelPasswordSetup()
+                }
+                    .controlSize(.small)
+                    .disabled(model.isBusy)
+            }
+
+            AccountLabeledRow("邮箱") {
+                TextField("name@example.com", text: $model.email)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.username)
+                    .disabled(model.isBusy)
+                    .onChange(of: model.email) { _, _ in model.emailDidChange() }
+            }
+
+            passwordRow(label: "密码", text: $model.password, isNewPassword: true)
+            passwordRow(label: "确认密码", text: $model.passwordConfirmation,
+                        isNewPassword: true)
+
+            Text("密码需为 15–128 个字符，可使用密码管理器生成，不能包含邮箱 @ 前的账号部分。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Button {
+                    Task { await model.requestPasswordSetupOTP() }
+                } label: {
+                    operationLabel(isRunning: model.isRequestingOTP,
+                                   title: "发送验证码",
+                                   systemImage: "paperplane")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canRequestPasswordSetupOTP)
+                Spacer()
+            }
+        }
+    }
+
+    private func passwordRow(label: String, text: Binding<String>,
+                             isNewPassword: Bool = false) -> some View {
+        AccountLabeledRow(label) {
+            HStack(spacing: AccountViewMetrics.inlineSpacing) {
+                Group {
+                    if revealsPassword {
+                        TextField("密码", text: text)
+                    } else {
+                        SecureField("密码", text: text)
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+                .textContentType(isNewPassword ? .newPassword : .password)
+                .disabled(model.isBusy)
+                .onChange(of: text.wrappedValue) { _, _ in model.passwordDidChange() }
+
+                Button {
+                    revealsPassword.toggle()
+                } label: {
+                    Image(systemName: revealsPassword ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                .help(revealsPassword ? "隐藏密码" : "显示密码")
+                .disabled(model.isBusy)
+                .accessibilityLabel(revealsPassword ? "隐藏密码" : "显示密码")
             }
         }
     }
@@ -318,6 +488,7 @@ struct AccountView: View {
             AccountLabeledRow("验证码") {
                 TextField("6 位数字", text: $model.code)
                     .textFieldStyle(.roundedBorder)
+                    .textContentType(.oneTimeCode)
                     .font(.system(.body, design: .monospaced))
                     .frame(maxWidth: AccountViewMetrics.codeFieldMaxWidth)
                     .disabled(model.isBusy)
@@ -348,7 +519,7 @@ struct AccountView: View {
                     Task { await model.verifyOTP() }
                 } label: {
                     operationLabel(isRunning: model.isVerifying,
-                                   title: "登录或注册",
+                                   title: model.verificationActionTitle,
                                    systemImage: "person.badge.key")
                 }
                 .buttonStyle(.borderedProminent)
@@ -357,7 +528,7 @@ struct AccountView: View {
                 Button(model.resendSeconds > 0
                        ? "\(model.resendSeconds) 秒后可重发"
                        : "重新发送") {
-                    Task { await model.requestOTP() }
+                    Task { await model.resendOTP() }
                 }
                 .monospacedDigit()
                 .frame(minWidth: AccountViewMetrics.secondaryActionMinWidth)
@@ -399,6 +570,12 @@ struct AccountView: View {
                         .font(.body.weight(.medium))
                     Spacer()
                 }
+            }
+
+            AccountLabeledRow("登录方式") {
+                Text(profile.hasPassword ? "邮箱验证码或密码" : "邮箱验证码")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             HStack(spacing: AccountViewMetrics.inlineSpacing) {
@@ -444,14 +621,40 @@ struct AccountView: View {
 
 @MainActor
 private final class VivaAccountViewModel: ObservableObject {
-    enum Stage {
+    enum Stage: Equatable {
         case email
         case verification
+    }
+
+    enum SignInMethod: String, CaseIterable, Identifiable {
+        case otp
+        case password
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .otp: return "验证码登录"
+            case .password: return "密码登录"
+            }
+        }
+    }
+
+    enum PasswordSetupKind: Equatable {
+        case registration
+        case recovery
+
+        var purpose: ManagedAuthPurpose {
+            switch self {
+            case .registration: return .register
+            case .recovery: return .recentAuth
+            }
+        }
     }
 
     private enum Operation {
         case restore
         case requestOTP
+        case passwordLogin
         case verify
         case refresh
         case logout
@@ -459,12 +662,16 @@ private final class VivaAccountViewModel: ObservableObject {
 
     @Published var email = ""
     @Published var code = ""
+    @Published var password = ""
+    @Published var passwordConfirmation = ""
+    @Published var signInMethod: SignInMethod = .otp
     @Published private(set) var pendingEmail = ""
     @Published private(set) var profile: VivaAccountProfile?
     @Published private(set) var stage: Stage = .email
     @Published private(set) var errorMessage: String?
     @Published private(set) var resendSeconds = 0
     @Published private(set) var developerCode: String?
+    @Published private(set) var passwordSetupKind: PasswordSetupKind?
 
     private let client: any VivaAccountClient
     private let showsDeveloperCode: Bool
@@ -472,6 +679,8 @@ private final class VivaAccountViewModel: ObservableObject {
     private var operation: Operation?
     private var didAttemptRestore = false
     private var countdownTask: Task<Void, Never>?
+    private var challengeID: String?
+    private var pendingPurpose: ManagedAuthPurpose = .loginOrRegister
 
     init(client: any VivaAccountClient,
          showsDeveloperCode: Bool,
@@ -484,16 +693,44 @@ private final class VivaAccountViewModel: ObservableObject {
     var isBusy: Bool { operation != nil }
     var isRestoring: Bool { operation == .restore }
     var isRequestingOTP: Bool { operation == .requestOTP }
+    var isPasswordLogin: Bool { operation == .passwordLogin }
     var isVerifying: Bool { operation == .verify }
     var isRefreshing: Bool { operation == .refresh }
     var isLoggingOut: Bool { operation == .logout }
+    var isSettingUpPassword: Bool { passwordSetupKind != nil }
+    var isRecoveringPassword: Bool { passwordSetupKind == .recovery }
+
+    var passwordSetupTitle: String {
+        isRecoveringPassword ? "重设密码" : "注册账号"
+    }
+
+    var verificationActionTitle: String {
+        switch passwordSetupKind {
+        case .registration: return "完成注册"
+        case .recovery: return "重设密码"
+        case nil: return "登录或注册"
+        }
+    }
 
     var canRequestOTP: Bool {
         !isBusy && Self.isPlausibleEmail(normalizedEmail)
     }
 
+    var canLoginWithPassword: Bool {
+        !isBusy && Self.isPlausibleEmail(normalizedEmail)
+            && !password.isEmpty && password.count <= 128
+    }
+
+    var canRequestPasswordSetupOTP: Bool {
+        !isBusy && passwordSetupKind != nil
+            && Self.isPlausibleEmail(normalizedEmail)
+            && !password.isEmpty && !passwordConfirmation.isEmpty
+    }
+
     var canVerify: Bool {
-        !isBusy && pendingEmail.count > 0 && code.count == 6 && code.allSatisfy(\.isNumber)
+        !isBusy && pendingEmail.count > 0 && code.count == 6
+            && code.allSatisfy(\.isNumber)
+            && (!isSettingUpPassword || challengeID != nil)
     }
 
     func restoreIfNeeded() async {
@@ -513,11 +750,16 @@ private final class VivaAccountViewModel: ObservableObject {
         }
     }
 
-    func requestOTP() async {
+    func requestOTP(purpose: ManagedAuthPurpose) async {
         guard !isBusy else { return }
         let target = normalizedEmail
         guard Self.isPlausibleEmail(target) else {
             errorMessage = "请输入有效的邮箱地址"
+            return
+        }
+        if purpose == .register || purpose == .recentAuth,
+           let passwordError = passwordValidationError(email: target) {
+            errorMessage = passwordError
             return
         }
 
@@ -526,13 +768,50 @@ private final class VivaAccountViewModel: ObservableObject {
         defer { operation = nil }
 
         do {
-            let delivery = try await client.requestOTP(email: target)
+            let delivery = try await client.requestOTP(email: target, purpose: purpose)
+            if purpose == .register || purpose == .recentAuth,
+               delivery.challengeID == nil {
+                errorMessage = "当前 Viva 服务不支持密码注册，请更新服务后重试"
+                return
+            }
             email = target
             pendingEmail = target
+            pendingPurpose = purpose
+            challengeID = delivery.challengeID
             code = ""
             stage = .verification
             developerCode = showsDeveloperCode ? delivery.developerCode : nil
             startCountdown(seconds: delivery.resendAfterSeconds)
+        } catch {
+            errorMessage = Self.message(for: error)
+        }
+    }
+
+    func requestPasswordSetupOTP() async {
+        guard let passwordSetupKind else { return }
+        await requestOTP(purpose: passwordSetupKind.purpose)
+    }
+
+    func resendOTP() async {
+        await requestOTP(purpose: pendingPurpose)
+    }
+
+    func loginWithPassword() async {
+        guard !isBusy else { return }
+        let target = normalizedEmail
+        guard Self.isPlausibleEmail(target), !password.isEmpty else {
+            errorMessage = "请输入邮箱和密码"
+            return
+        }
+
+        operation = .passwordLogin
+        errorMessage = nil
+        defer { operation = nil }
+
+        do {
+            let verified = try await client.loginWithPassword(
+                email: target, password: password)
+            completeAuthentication(verified)
         } catch {
             errorMessage = Self.message(for: error)
         }
@@ -550,14 +829,20 @@ private final class VivaAccountViewModel: ObservableObject {
         defer { operation = nil }
 
         do {
-            let verified = try await client.verifyOTP(email: pendingEmail, code: code)
-            profile = verified
-            email = verified.email
-            code = ""
-            developerCode = nil
-            countdownTask?.cancel()
-            resendSeconds = 0
-            onProfileChange(verified)
+            let verified: VivaAccountProfile
+            if passwordSetupKind != nil {
+                guard let challengeID else {
+                    errorMessage = "验证码挑战已失效，请重新发送"
+                    return
+                }
+                verified = try await client.setupPassword(
+                    email: pendingEmail, password: password, code: code,
+                    challengeID: challengeID)
+            } else {
+                verified = try await client.verifyOTP(
+                    email: pendingEmail, code: code, challengeID: challengeID)
+            }
+            completeAuthentication(verified)
         } catch {
             errorMessage = Self.message(for: error)
         }
@@ -593,22 +878,45 @@ private final class VivaAccountViewModel: ObservableObject {
             errorMessage = Self.message(for: error)
         }
         profile = nil
-        pendingEmail = ""
-        code = ""
-        developerCode = nil
-        stage = .email
-        countdownTask?.cancel()
-        resendSeconds = 0
+        resetAuthenticationForm(resetMethod: true)
         onProfileChange(nil)
+    }
+
+    func beginPasswordSetup(_ kind: PasswordSetupKind) {
+        guard !isBusy else { return }
+        resetPendingChallenge()
+        password = ""
+        passwordConfirmation = ""
+        passwordSetupKind = kind
+        signInMethod = .password
+        stage = .email
+        errorMessage = nil
+    }
+
+    func cancelPasswordSetup() {
+        guard !isBusy else { return }
+        resetPendingChallenge()
+        password = ""
+        passwordConfirmation = ""
+        passwordSetupKind = nil
+        signInMethod = .password
+        stage = .email
+        errorMessage = nil
+    }
+
+    func signInMethodDidChange() {
+        guard !isBusy else { return }
+        resetPendingChallenge()
+        passwordSetupKind = nil
+        password = ""
+        passwordConfirmation = ""
+        stage = .email
+        errorMessage = nil
     }
 
     func changeEmail() {
         guard !isBusy else { return }
-        countdownTask?.cancel()
-        resendSeconds = 0
-        code = ""
-        pendingEmail = ""
-        developerCode = nil
+        resetPendingChallenge()
         errorMessage = nil
         stage = .email
     }
@@ -623,8 +931,58 @@ private final class VivaAccountViewModel: ObservableObject {
         if stage == .email, !isBusy { errorMessage = nil }
     }
 
+    func passwordDidChange() {
+        if stage == .email, !isBusy { errorMessage = nil }
+    }
+
     private var normalizedEmail: String {
         email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func completeAuthentication(_ verified: VivaAccountProfile) {
+        profile = verified
+        email = verified.email
+        password = ""
+        passwordConfirmation = ""
+        passwordSetupKind = nil
+        resetPendingChallenge()
+        onProfileChange(verified)
+    }
+
+    private func resetAuthenticationForm(resetMethod: Bool) {
+        resetPendingChallenge()
+        password = ""
+        passwordConfirmation = ""
+        passwordSetupKind = nil
+        stage = .email
+        if resetMethod { signInMethod = .otp }
+    }
+
+    private func resetPendingChallenge() {
+        countdownTask?.cancel()
+        resendSeconds = 0
+        code = ""
+        pendingEmail = ""
+        developerCode = nil
+        challengeID = nil
+        pendingPurpose = .loginOrRegister
+    }
+
+    private func passwordValidationError(email: String) -> String? {
+        guard password.count >= 15, password.count <= 128,
+              !password.contains("\n"), !password.contains("\r"),
+              !password.contains("\0") else {
+            return "密码需为 15–128 个字符"
+        }
+        guard password == passwordConfirmation else {
+            return "两次输入的密码不一致"
+        }
+        let localPart = email.split(separator: "@", maxSplits: 1).first.map(String.init) ?? ""
+        if localPart.count >= 3,
+           password.localizedCaseInsensitiveContains(localPart) {
+            return "密码不能包含邮箱 @ 前的账号部分"
+        }
+        return nil
     }
 
     private func startCountdown(seconds: Int) {

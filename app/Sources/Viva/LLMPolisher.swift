@@ -9,6 +9,7 @@ final class LLMPolisher {
     struct Result {
         let text: String
         let elapsedMs: Int
+        let requestID: String?
         /// 保留这个字段兼容现有 UI；产品接口永远不会把思维链下发给客户端。
         var thoughtLeaked: Bool = false
     }
@@ -68,29 +69,41 @@ final class LLMPolisher {
 
         // 总超时按文本长度放宽。流式响应会持续收到字节，URLSession 自身的 idle timeout
         // 无法限制总时长，因此 streamed() 仍有独立 deadline。
-        let budgetMs = config.polishTimeoutMs + trimmed.count * 30
+        let budgetMs = min(120_000, config.polishTimeoutMs + trimmed.count * 30)
+        let clientRequestID = UUID().uuidString.lowercased()
+        request.setValue(clientRequestID, forHTTPHeaderField: "X-Request-ID")
+        request.setValue(String(budgetMs), forHTTPHeaderField: "X-Viva-Client-Timeout-Ms")
         request.timeoutInterval = Double(budgetMs) / 1000.0
 
         let startedAt = Date()
         let response: ManagedResponse
         do {
-            request = try await authorizedRequest(request, url: url, baseURL: baseURL)
-            response = config.polishStream
-                ? try await streamed(request, budgetMs: budgetMs)
-                : try await once(request)
-        } catch PolishError.unauthorized {
-            // 401 发生在请求执行前，不会产生模型调用或计费。刷新会话后只重试一次；
-            // 已建立的 SSE 流中途断开绝不自动重放。
-            try? await ManagedBackendAuth.shared.invalidateAccessToken(baseURL: baseURL)
             do {
                 request = try await authorizedRequest(request, url: url, baseURL: baseURL)
                 response = config.polishStream
                     ? try await streamed(request, budgetMs: budgetMs)
                     : try await once(request)
             } catch PolishError.unauthorized {
-                try? await ManagedBackendAuth.shared.clearRejectedSession(baseURL: baseURL)
-                throw PolishError.unauthorized
+                // 401 发生在请求执行前，不会产生模型调用或计费。刷新会话后只重试一次；
+                // 已建立的 SSE 流中途断开绝不自动重放。
+                try? await ManagedBackendAuth.shared.invalidateAccessToken(baseURL: baseURL)
+                do {
+                    request = try await authorizedRequest(request, url: url, baseURL: baseURL)
+                    response = config.polishStream
+                        ? try await streamed(request, budgetMs: budgetMs)
+                        : try await once(request)
+                } catch PolishError.unauthorized {
+                    try? await ManagedBackendAuth.shared.clearRejectedSession(baseURL: baseURL)
+                    throw PolishError.unauthorized
+                }
             }
+        } catch {
+            let measured = Int(Date().timeIntervalSince(startedAt) * 1000)
+            let failure = Self.clientFailureOutcome(error: error)
+            reportOutcome(requestID: clientRequestID, outcome: failure.outcome,
+                          detail: failure.detail, elapsedMs: measured,
+                          budgetMs: budgetMs, baseURL: baseURL)
+            throw error
         }
         if let balanceAfter = response.balanceAfter {
             try? await ManagedBackendAuth.shared.recordAvailablePoints(
@@ -106,15 +119,30 @@ final class LLMPolisher {
             if inner.contains(pair.0) || inner.contains(pair.1) { continue }
             output = String(inner)
         }
-        guard !output.isEmpty else { throw PolishError.empty }
+        guard !output.isEmpty else {
+            reportOutcome(requestID: response.requestID ?? clientRequestID,
+                          outcome: "rejected", detail: "empty_output",
+                          elapsedMs: Int(Date().timeIntervalSince(startedAt) * 1000),
+                          budgetMs: budgetMs, baseURL: baseURL)
+            throw PolishError.empty
+        }
         guard Self.isSaneResult(original: trimmed, polished: output) else {
             Log.warn("托管润色结果未通过客户端护栏（原文 \(trimmed.count) 字 → 返回 \(output.count) 字）")
+            reportOutcome(requestID: response.requestID ?? clientRequestID,
+                          outcome: "rejected", detail: "client_output_guard",
+                          elapsedMs: Int(Date().timeIntervalSince(startedAt) * 1000),
+                          budgetMs: budgetMs, baseURL: baseURL)
             throw PolishError.unsafeResult
         }
 
         let measured = Int(Date().timeIntervalSince(startedAt) * 1000)
+        let requestID = response.requestID ?? clientRequestID
+        reportOutcome(requestID: requestID, outcome: "received",
+                      detail: "complete_response_validated", elapsedMs: measured,
+                      budgetMs: budgetMs, baseURL: baseURL)
         return Result(text: output,
                       elapsedMs: response.elapsedMs ?? measured,
+                      requestID: requestID,
                       thoughtLeaked: false)
     }
 
@@ -130,6 +158,7 @@ final class LLMPolisher {
         var text: String
         var elapsedMs: Int?
         var balanceAfter: Int64?
+        var requestID: String?
     }
 
     private func authorizedRequest(_ original: URLRequest, url: URL,
@@ -154,7 +183,9 @@ final class LLMPolisher {
         return ManagedResponse(
             text: text,
             elapsedMs: object["elapsed_ms"] as? Int,
-            balanceAfter: Self.balanceAfter(in: object))
+            balanceAfter: Self.balanceAfter(in: object),
+            requestID: (object["request_id"] as? String)
+                ?? (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Request-ID"))
     }
 
     /// 解析产品 SSE：meta → delta* → final → usage → done（或 error）。
@@ -178,6 +209,7 @@ final class LLMPolisher {
         var finalText: String?
         var elapsedMs: Int?
         var balanceAfter: Int64?
+        var requestID = http.value(forHTTPHeaderField: "X-Request-ID")
         var didReceiveDone = false
 
         func consumeEvent() async throws {
@@ -194,6 +226,11 @@ final class LLMPolisher {
             guard let data = payload.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return }
+
+            if let reportedRequestID = object["request_id"] as? String,
+               !reportedRequestID.isEmpty {
+                requestID = reportedRequestID
+            }
 
             switch event {
             case "delta":
@@ -260,7 +297,43 @@ final class LLMPolisher {
             throw PolishError.badResponse("流式响应未完整结束")
         }
         return ManagedResponse(text: text, elapsedMs: elapsedMs,
-                               balanceAfter: balanceAfter)
+                               balanceAfter: balanceAfter, requestID: requestID)
+    }
+
+    private func reportOutcome(requestID: String, outcome: String, detail: String,
+                               elapsedMs: Int, budgetMs: Int, baseURL: URL) {
+        Task.detached(priority: .utility) {
+            try? await ManagedBackendAuth.shared.reportLLMOutcome(
+                requestID: requestID, outcome: outcome, detail: detail,
+                clientElapsedMS: elapsedMs, timeoutBudgetMS: budgetMs,
+                baseURL: baseURL)
+        }
+    }
+
+    private static func clientFailureOutcome(error: Error) -> (outcome: String, detail: String) {
+        if error is CancellationError || Task.isCancelled {
+            return ("cancelled", "client_task_cancelled")
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return ("cancelled", "url_session_cancelled")
+        }
+        if let polishError = error as? PolishError {
+            switch polishError {
+            case .timeout:
+                return ("timeout", "client_timeout")
+            case .empty:
+                return ("rejected", "empty_output")
+            case .unsafeResult:
+                return ("rejected", "client_output_guard")
+            case .unauthorized:
+                return ("fallback", "session_unauthorized")
+            case .badResponse:
+                return ("fallback", "invalid_or_failed_response")
+            case .notConfigured, .tooLong:
+                return ("fallback", "request_not_sent")
+            }
+        }
+        return ("fallback", "client_request_failed")
     }
 
     private func check(response: URLResponse, data: Data) throws {

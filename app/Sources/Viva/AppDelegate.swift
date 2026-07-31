@@ -183,7 +183,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let shouldPresentMainWindow = self.state.accountProfile == nil
                     self.state.accountProfile = VivaAccountProfile(
                         email: user.email ?? "",
-                        credits: wallet.availablePoints)
+                        credits: wallet.availablePoints,
+                        hasPassword: user.hasPassword)
                     if shouldPresentMainWindow {
                         self.accountWindow.close()
                         if self.state.config.hasSeenWelcome {
