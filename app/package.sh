@@ -30,7 +30,8 @@ echo "▸ 版本 ${VERSION}"
 # --keepParent 让解压后是 Viva.app 而不是散落的 Contents/
 echo "▸ 打 ZIP …"
 rm -f "${ZIP_PATH}"
-ditto -c -k --keepParent "${APP_DIR}" "${ZIP_PATH}"
+ditto -c -k --keepParent --norsrc --noextattr --noqtn --noacl \
+  "${APP_DIR}" "${ZIP_PATH}"
 
 # ── DMG ──────────────────────────────────────────────────────────
 # 布局：app + Applications 软链接，用户拖过去即装。
@@ -38,7 +39,8 @@ ditto -c -k --keepParent "${APP_DIR}" "${ZIP_PATH}"
 echo "▸ 打 DMG …"
 rm -rf "${STAGE_DIR}" "${DMG_PATH}"
 mkdir -p "${STAGE_DIR}"
-ditto "${APP_DIR}" "${STAGE_DIR}/Viva.app"
+ditto --norsrc --noextattr --noqtn --noacl \
+  "${APP_DIR}" "${STAGE_DIR}/Viva.app"
 ln -s /Applications "${STAGE_DIR}/Applications"
 
 hdiutil create \
