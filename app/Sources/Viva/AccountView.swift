@@ -32,7 +32,7 @@ protocol VivaAccountClient: Sendable {
     func requestOTP(email: String, purpose: ManagedAuthPurpose) async throws -> VivaOTPDelivery
     func verifyOTP(email: String, code: String,
                    challengeID: String?) async throws -> VivaAccountProfile
-    func loginWithPassword(email: String, password: String) async throws -> VivaAccountProfile
+    func loginWithPassword(account: String, password: String) async throws -> VivaAccountProfile
     func setupPassword(email: String, password: String, code: String,
                        challengeID: String) async throws -> VivaAccountProfile
     func refreshProfile() async throws -> VivaAccountProfile
@@ -343,12 +343,12 @@ struct AccountView: View {
 
     private var passwordLoginEntry: some View {
         VStack(alignment: .leading, spacing: AccountViewMetrics.rowSpacing) {
-            AccountLabeledRow("邮箱") {
-                TextField("name@example.com", text: $model.email)
+            AccountLabeledRow("账号或邮箱") {
+                TextField("账号或 name@example.com", text: $model.account)
                     .textFieldStyle(.roundedBorder)
                     .textContentType(.username)
                     .disabled(model.isBusy)
-                    .onChange(of: model.email) { _, _ in model.emailDidChange() }
+                    .onChange(of: model.account) { _, _ in model.accountDidChange() }
             }
 
             passwordRow(label: "密码", text: $model.password)
@@ -421,7 +421,7 @@ struct AccountView: View {
             passwordRow(label: "确认密码", text: $model.passwordConfirmation,
                         isNewPassword: true)
 
-            Text("密码需为 15–128 个字符，可使用密码管理器生成，不能包含邮箱 @ 前的账号部分。")
+            Text("密码需为 8–128 个字符，不能使用常见弱密码，也不能包含邮箱 @ 前的账号部分。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -661,6 +661,7 @@ private final class VivaAccountViewModel: ObservableObject {
     }
 
     @Published var email = ""
+    @Published var account = ""
     @Published var code = ""
     @Published var password = ""
     @Published var passwordConfirmation = ""
@@ -717,7 +718,7 @@ private final class VivaAccountViewModel: ObservableObject {
     }
 
     var canLoginWithPassword: Bool {
-        !isBusy && Self.isPlausibleEmail(normalizedEmail)
+        !isBusy && Self.isPlausibleAccount(normalizedAccount)
             && !password.isEmpty && password.count <= 128
     }
 
@@ -743,7 +744,10 @@ private final class VivaAccountViewModel: ObservableObject {
         do {
             let restored = try await client.restore()
             profile = restored
-            if let restored { email = restored.email }
+            if let restored {
+                email = restored.email
+                account = restored.email
+            }
             onProfileChange(restored)
         } catch {
             errorMessage = Self.message(for: error)
@@ -798,9 +802,9 @@ private final class VivaAccountViewModel: ObservableObject {
 
     func loginWithPassword() async {
         guard !isBusy else { return }
-        let target = normalizedEmail
-        guard Self.isPlausibleEmail(target), !password.isEmpty else {
-            errorMessage = "请输入邮箱和密码"
+        let target = normalizedAccount
+        guard Self.isPlausibleAccount(target), !password.isEmpty else {
+            errorMessage = "请输入账号或邮箱和密码"
             return
         }
 
@@ -810,7 +814,7 @@ private final class VivaAccountViewModel: ObservableObject {
 
         do {
             let verified = try await client.loginWithPassword(
-                email: target, password: password)
+                account: target, password: password)
             completeAuthentication(verified)
         } catch {
             errorMessage = Self.message(for: error)
@@ -858,6 +862,7 @@ private final class VivaAccountViewModel: ObservableObject {
             let refreshed = try await client.refreshProfile()
             profile = refreshed
             email = refreshed.email
+            account = refreshed.email
             onProfileChange(refreshed)
         } catch {
             errorMessage = Self.message(for: error)
@@ -906,6 +911,9 @@ private final class VivaAccountViewModel: ObservableObject {
 
     func signInMethodDidChange() {
         guard !isBusy else { return }
+        if signInMethod == .password, account.isEmpty, !email.isEmpty {
+            account = email
+        }
         resetPendingChallenge()
         passwordSetupKind = nil
         password = ""
@@ -931,6 +939,10 @@ private final class VivaAccountViewModel: ObservableObject {
         if stage == .email, !isBusy { errorMessage = nil }
     }
 
+    func accountDidChange() {
+        if stage == .email, !isBusy { errorMessage = nil }
+    }
+
     func passwordDidChange() {
         if stage == .email, !isBusy { errorMessage = nil }
     }
@@ -939,9 +951,14 @@ private final class VivaAccountViewModel: ObservableObject {
         email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
+    private var normalizedAccount: String {
+        account.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
     private func completeAuthentication(_ verified: VivaAccountProfile) {
         profile = verified
         email = verified.email
+        account = verified.email
         password = ""
         passwordConfirmation = ""
         passwordSetupKind = nil
@@ -969,10 +986,10 @@ private final class VivaAccountViewModel: ObservableObject {
     }
 
     private func passwordValidationError(email: String) -> String? {
-        guard password.count >= 15, password.count <= 128,
+        guard password.count >= 8, password.count <= 128,
               !password.contains("\n"), !password.contains("\r"),
               !password.contains("\0") else {
-            return "密码需为 15–128 个字符"
+            return "密码需为 8–128 个字符"
         }
         guard password == passwordConfirmation else {
             return "两次输入的密码不一致"
@@ -1012,6 +1029,11 @@ private final class VivaAccountViewModel: ObservableObject {
               value[..<at].contains("@") == false
         else { return false }
         return value[value.index(after: at)...].contains(".")
+    }
+
+    private static func isPlausibleAccount(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 320
+            && !value.contains(where: \.isWhitespace)
     }
 
     private static func message(for error: Error) -> String {

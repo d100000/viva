@@ -16,13 +16,11 @@ final class LLMPolisher {
 
     enum PolishError: LocalizedError {
         case notConfigured, timeout, empty, tooLong, unsafeResult
-        case unauthorized
         case badResponse(String)
 
         var errorDescription: String? {
             switch self {
             case .notConfigured: return "Viva 服务地址无效"
-            case .unauthorized: return "Viva 会话已失效，请重试"
             case .badResponse(let value): return "Viva 润色服务返回异常：\(value)"
             case .timeout: return "润色超时"
             case .empty: return "润色返回了空内容"
@@ -78,25 +76,9 @@ final class LLMPolisher {
         let startedAt = Date()
         let response: ManagedResponse
         do {
-            do {
-                request = try await authorizedRequest(request, url: url, baseURL: baseURL)
-                response = config.polishStream
-                    ? try await streamed(request, budgetMs: budgetMs)
-                    : try await once(request)
-            } catch PolishError.unauthorized {
-                // 401 发生在请求执行前，不会产生模型调用或计费。刷新会话后只重试一次；
-                // 已建立的 SSE 流中途断开绝不自动重放。
-                try? await ManagedBackendAuth.shared.invalidateAccessToken(baseURL: baseURL)
-                do {
-                    request = try await authorizedRequest(request, url: url, baseURL: baseURL)
-                    response = config.polishStream
-                        ? try await streamed(request, budgetMs: budgetMs)
-                        : try await once(request)
-                } catch PolishError.unauthorized {
-                    try? await ManagedBackendAuth.shared.clearRejectedSession(baseURL: baseURL)
-                    throw PolishError.unauthorized
-                }
-            }
+            response = config.polishStream
+                ? try await streamed(request, budgetMs: budgetMs, baseURL: baseURL)
+                : try await once(request, baseURL: baseURL)
         } catch {
             let measured = Int(Date().timeIntervalSince(startedAt) * 1000)
             let failure = Self.clientFailureOutcome(error: error)
@@ -161,21 +143,14 @@ final class LLMPolisher {
         var requestID: String?
     }
 
-    private func authorizedRequest(_ original: URLRequest, url: URL,
-                                   baseURL: URL) async throws -> URLRequest {
-        var request = original
-        let auth = try await ManagedBackendAuth.shared.authorizedHeaders(
-            for: url, method: "POST", baseURL: baseURL)
-        for (key, value) in auth { request.setValue(value, forHTTPHeaderField: key) }
-        return request
-    }
-
-    private func once(_ request: URLRequest) async throws -> ManagedResponse {
-        let (data, response): (Data, URLResponse)
-        do { (data, response) = try await URLSession.shared.data(for: request) }
+    private func once(_ request: URLRequest, baseURL: URL) async throws -> ManagedResponse {
+        let (data, response): (Data, HTTPURLResponse)
+        do {
+            (data, response) = try await ManagedBackendAuth.shared.authorizedData(
+                for: request, baseURL: baseURL)
+        }
         catch let error as URLError where error.code == .timedOut { throw PolishError.timeout }
 
-        try check(response: response, data: data)
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let text = object["text"] as? String else {
             throw PolishError.badResponse("响应不是合法 JSON")
@@ -185,22 +160,18 @@ final class LLMPolisher {
             elapsedMs: object["elapsed_ms"] as? Int,
             balanceAfter: Self.balanceAfter(in: object),
             requestID: (object["request_id"] as? String)
-                ?? (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Request-ID"))
+                ?? response.value(forHTTPHeaderField: "X-Request-ID"))
     }
 
     /// 解析产品 SSE：meta → delta* → final → usage → done（或 error）。
-    private func streamed(_ request: URLRequest, budgetMs: Int) async throws -> ManagedResponse {
-        let (bytes, response): (URLSession.AsyncBytes, URLResponse)
-        do { (bytes, response) = try await URLSession.shared.bytes(for: request) }
+    private func streamed(_ request: URLRequest, budgetMs: Int,
+                          baseURL: URL) async throws -> ManagedResponse {
+        let (bytes, http): (URLSession.AsyncBytes, HTTPURLResponse)
+        do {
+            (bytes, http) = try await ManagedBackendAuth.shared.authorizedBytes(
+                for: request, baseURL: baseURL)
+        }
         catch let error as URLError where error.code == .timedOut { throw PolishError.timeout }
-
-        guard let http = response as? HTTPURLResponse else {
-            throw PolishError.badResponse("没有收到 HTTP 响应")
-        }
-        if http.statusCode == 401 { throw PolishError.unauthorized }
-        if !(200...299).contains(http.statusCode) {
-            throw PolishError.badResponse(Self.httpFailure(http, data: nil))
-        }
 
         let deadline = Date().addingTimeInterval(Double(budgetMs) / 1000.0)
         var event = "message"
@@ -325,8 +296,6 @@ final class LLMPolisher {
                 return ("rejected", "empty_output")
             case .unsafeResult:
                 return ("rejected", "client_output_guard")
-            case .unauthorized:
-                return ("fallback", "session_unauthorized")
             case .badResponse:
                 return ("fallback", "invalid_or_failed_response")
             case .notConfigured, .tooLong:
@@ -334,30 +303,6 @@ final class LLMPolisher {
             }
         }
         return ("fallback", "client_request_failed")
-    }
-
-    private func check(response: URLResponse, data: Data) throws {
-        guard let http = response as? HTTPURLResponse else {
-            throw PolishError.badResponse("没有收到 HTTP 响应")
-        }
-        if http.statusCode == 401 { throw PolishError.unauthorized }
-        guard (200...299).contains(http.statusCode) else {
-            throw PolishError.badResponse(Self.httpFailure(http, data: data))
-        }
-    }
-
-    private static func httpFailure(_ response: HTTPURLResponse, data: Data?) -> String {
-        var values = ["HTTP \(response.statusCode)"]
-        if let data,
-           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let error = root["error"] as? [String: Any],
-           let code = error["code"] as? String, !code.isEmpty {
-            values.append(code)
-        }
-        if let requestID = response.value(forHTTPHeaderField: "X-Request-ID"), !requestID.isEmpty {
-            values.append("request_id=\(requestID)")
-        }
-        return values.joined(separator: " ")
     }
 
     private static func balanceAfter(in object: [String: Any]) -> Int64? {

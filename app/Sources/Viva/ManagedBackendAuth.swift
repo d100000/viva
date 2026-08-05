@@ -27,7 +27,9 @@ enum ManagedAuthRestorePhase: Equatable, Sendable {
 
 struct ManagedAccountUser: Codable, Equatable, Sendable {
     let id: String
+    let username: String?
     let deviceId: String
+    let keyThumbprint: String?
     let email: String?
     let accountType: String
     let status: String
@@ -38,6 +40,8 @@ struct ManagedAccountUser: Codable, Equatable, Sendable {
     let clientOsBuild: String?
     let clientArchitecture: String?
     let clientDeviceModel: String?
+    let displayName: String?
+    let maxConcurrency: Int?
     let locale: String?
     let timezone: String?
     let passwordUpdatedAt: String?
@@ -178,7 +182,7 @@ final class ManagedBackendAuthState: ObservableObject, @unchecked Sendable {
 
 /// Owns the complete current server authentication lifecycle.
 ///
-/// The current server contract uses email OTP and Bearer access tokens. The
+/// The current server contract uses email OTP and short-lived Bearer access tokens. The
 /// access token, rotating refresh token, expiry, and device ID are persisted as
 /// one atomic value so a refresh can never expose a half-written token pair.
 actor ManagedBackendAuth: VivaAccountClient {
@@ -220,7 +224,6 @@ actor ManagedBackendAuth: VivaAccountClient {
         var deviceID: String
         /// Persisted before the request. A retry after timeout must reuse it.
         var pendingRefreshID: String?
-
         var publicValue: ManagedBackendSession {
             ManagedBackendSession(accessToken: accessToken,
                                   deviceID: deviceID,
@@ -248,6 +251,31 @@ actor ManagedBackendAuth: VivaAccountClient {
         let expiresAt: String
     }
 
+    private struct OTPRequestBody: Encodable {
+        let email: String
+        let purpose: String
+        let deviceID: String
+        let clientName: String
+        let clientPlatform: String
+        let clientVersion: String
+        let osVersion: String
+        let osBuild: String
+        let clientArchitecture: String
+        let deviceModel: String
+        let locale: String
+        let timezone: String
+        let webSession: Bool
+    }
+
+    private struct OTPVerifyRequest: Encodable {
+        let email: String
+        let code: String
+        let deviceID: String
+        let challengeID: String?
+        let webSession: Bool
+        let rememberMe: Bool
+    }
+
     private struct TokenResponse: Decodable {
         let accessToken: String
         let refreshToken: String
@@ -255,9 +283,20 @@ actor ManagedBackendAuth: VivaAccountClient {
     }
 
     private struct PasswordLoginRequest: Encodable {
-        let email: String
+        let account: String
         let password: String
         let deviceID: String
+        let clientName: String
+        let clientPlatform: String
+        let clientVersion: String
+        let osVersion: String
+        let osBuild: String
+        let clientArchitecture: String
+        let deviceModel: String
+        let locale: String
+        let timezone: String
+        let webSession: Bool
+        let rememberMe: Bool
     }
 
     private struct PasswordSetupRequest: Encodable {
@@ -266,6 +305,8 @@ actor ManagedBackendAuth: VivaAccountClient {
         let code: String
         let challengeID: String
         let deviceID: String
+        let webSession: Bool
+        let rememberMe: Bool
     }
 
     private struct ASRTicketResponse: Decodable {
@@ -274,8 +315,6 @@ actor ManagedBackendAuth: VivaAccountClient {
         let expiresAt: String
         let websocketUrl: String
     }
-
-    private struct StatusResponse: Decodable { let status: String }
 
     private struct ErrorEnvelope: Decodable {
         struct Body: Decodable {
@@ -346,9 +385,9 @@ actor ManagedBackendAuth: VivaAccountClient {
         return Self.accountProfile(user: verification.user, wallet: verification.wallet)
     }
 
-    func loginWithPassword(email: String, password: String) async throws -> VivaAccountProfile {
+    func loginWithPassword(account: String, password: String) async throws -> VivaAccountProfile {
         let verification = try await loginWithPassword(
-            email: email, password: password, baseURL: configuredBaseURL())
+            account: account, password: password, baseURL: configuredBaseURL())
         return Self.accountProfile(user: verification.user, wallet: verification.wallet)
     }
 
@@ -377,22 +416,16 @@ actor ManagedBackendAuth: VivaAccountClient {
         let normalizedEmail = try Self.normalizedEmail(email)
         let localDeviceID = try stableDeviceID()
         let metadata = Self.clientMetadata
-        let body = try networkEncoder.encode([
-            "email": normalizedEmail,
-            "purpose": purpose.rawValue,
-            "device_id": localDeviceID,
-            "client_name": metadata.name,
-            "client_platform": metadata.platform,
-            "client_version": metadata.version,
-            "os_version": metadata.osVersion,
-            "os_build": metadata.osBuild ?? "",
-            "client_architecture": metadata.architecture,
-            "device_model": metadata.deviceModel ?? "",
-            "locale": metadata.locale,
-            "timezone": metadata.timezone,
-        ])
+        let body = try networkEncoder.encode(OTPRequestBody(
+            email: normalizedEmail, purpose: purpose.rawValue, deviceID: localDeviceID,
+            clientName: metadata.name, clientPlatform: metadata.platform,
+            clientVersion: metadata.version, osVersion: metadata.osVersion,
+            osBuild: metadata.osBuild ?? "", clientArchitecture: metadata.architecture,
+            deviceModel: metadata.deviceModel ?? "", locale: metadata.locale,
+            timezone: metadata.timezone, webSession: false))
         let response: OTPResponse = try await send(path: "/v1/auth/otp/request",
                                                    method: "POST", body: body,
+                                                   deviceID: localDeviceID,
                                                    baseURL: baseURL)
         guard let expiresAt = Self.parseDate(response.expiresAt) else {
             throw AuthError.invalidResponse
@@ -412,35 +445,38 @@ actor ManagedBackendAuth: VivaAccountClient {
             throw AuthError.invalidInput("请输入 6 位数字验证码")
         }
         let localDeviceID = try stableDeviceID()
-        var payload = [
-            "email": normalizedEmail,
-            "code": normalizedCode,
-            "device_id": localDeviceID,
-        ]
-        if let challengeID, !challengeID.isEmpty {
-            payload["challenge_id"] = challengeID
-        }
-        let body = try networkEncoder.encode(payload)
+        let body = try networkEncoder.encode(OTPVerifyRequest(
+            email: normalizedEmail, code: normalizedCode, deviceID: localDeviceID,
+            challengeID: challengeID.flatMap { $0.isEmpty ? nil : $0 },
+            webSession: false, rememberMe: false))
         let response: OTPVerifyResponse = try await send(path: "/v1/auth/otp/verify",
                                                          method: "POST", body: body,
+                                                         deviceID: localDeviceID,
                                                          baseURL: baseURL)
         return try await persistAuthentication(response, localDeviceID: localDeviceID,
                                                baseURL: baseURL)
     }
 
     @discardableResult
-    func loginWithPassword(email: String, password: String,
+    func loginWithPassword(account: String, password: String,
                            baseURL: URL) async throws -> ManagedOTPVerification {
-        let normalizedEmail = try Self.normalizedEmail(email)
+        let normalizedAccount = try Self.normalizedAccount(account)
         guard !password.isEmpty, password.count <= 128 else {
             throw AuthError.invalidInput("请输入账号密码")
         }
         let localDeviceID = try stableDeviceID()
+        let metadata = Self.clientMetadata
         let body = try networkEncoder.encode(PasswordLoginRequest(
-            email: normalizedEmail, password: password, deviceID: localDeviceID))
+            account: normalizedAccount, password: password, deviceID: localDeviceID,
+            clientName: metadata.name, clientPlatform: metadata.platform,
+            clientVersion: metadata.version,
+            osVersion: metadata.osVersion, osBuild: metadata.osBuild ?? "",
+            clientArchitecture: metadata.architecture,
+            deviceModel: metadata.deviceModel ?? "", locale: metadata.locale,
+            timezone: metadata.timezone, webSession: false, rememberMe: false))
         let response: OTPVerifyResponse = try await send(
             path: "/v1/auth/password/login", method: "POST", body: body,
-            baseURL: baseURL)
+            deviceID: localDeviceID, baseURL: baseURL)
         return try await persistAuthentication(response, localDeviceID: localDeviceID,
                                                baseURL: baseURL)
     }
@@ -459,10 +495,11 @@ actor ManagedBackendAuth: VivaAccountClient {
         let localDeviceID = try stableDeviceID()
         let body = try networkEncoder.encode(PasswordSetupRequest(
             email: normalizedEmail, password: password, code: normalizedCode,
-            challengeID: challengeID, deviceID: localDeviceID))
+            challengeID: challengeID, deviceID: localDeviceID,
+            webSession: false, rememberMe: false))
         let response: OTPVerifyResponse = try await send(
             path: "/v1/auth/password/setup", method: "POST", body: body,
-            baseURL: baseURL)
+            deviceID: localDeviceID, baseURL: baseURL)
         return try await persistAuthentication(response, localDeviceID: localDeviceID,
                                                baseURL: baseURL)
     }
@@ -476,11 +513,9 @@ actor ManagedBackendAuth: VivaAccountClient {
         }
         let origin = try originString(baseURL)
         let deviceID = response.user.deviceId.isEmpty ? localDeviceID : response.user.deviceId
-        let stored = StoredSession(accessToken: response.accessToken,
-                                   refreshToken: response.refreshToken,
-                                   expiresAt: expiresAt,
-                                   deviceID: deviceID,
-                                   pendingRefreshID: nil)
+        let stored = StoredSession(
+            accessToken: response.accessToken, refreshToken: response.refreshToken,
+            expiresAt: expiresAt, deviceID: deviceID, pendingRefreshID: nil)
         try persist(stored, origin: origin)
         memory[origin] = stored
         await state.authenticated(origin: origin, user: response.user,
@@ -560,10 +595,9 @@ actor ManagedBackendAuth: VivaAccountClient {
         var remoteError: Error?
         if try storedSession(origin: origin) != nil {
             do {
-                let _: StatusResponse = try await authorized(path: "/v1/auth/logout",
-                                                             method: "POST",
-                                                             body: Data("{}".utf8),
-                                                             baseURL: baseURL)
+                try await authorizedWithoutResponse(
+                    path: "/v1/auth/logout", method: "POST",
+                    body: Data("{}".utf8), baseURL: baseURL)
             } catch {
                 remoteError = error
             }
@@ -577,9 +611,10 @@ actor ManagedBackendAuth: VivaAccountClient {
         if let cachedInstallID { return cachedInstallID }
         if let data = try read(account: installAccount),
            let value = String(data: data, encoding: .utf8),
-           !value.isEmpty, value.utf8.count <= 128 {
-            cachedInstallID = value
-            return value
+           let identifier = UUID(uuidString: value.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            let normalized = identifier.uuidString.lowercased()
+            cachedInstallID = normalized
+            return normalized
         }
         let value = UUID().uuidString.lowercased()
         try write(Data(value.utf8), account: installAccount)
@@ -591,49 +626,19 @@ actor ManagedBackendAuth: VivaAccountClient {
 
     func session(for baseURL: URL) async throws -> ManagedBackendSession {
         let origin = try originString(baseURL)
+        return try await activeSession(baseURL: baseURL, origin: origin).publicValue
+    }
+
+    private func activeSession(baseURL: URL, origin: String) async throws -> StoredSession {
         guard let current = try storedSession(origin: origin) else {
             await state.signedOut(origin: origin)
             throw AuthError.notLoggedIn
         }
         if current.expiresAt.timeIntervalSinceNow > 90 {
             await state.sessionRestored(origin: origin, deviceID: current.deviceID)
-            return current.publicValue
+            return current
         }
-        return try await refreshSingleFlight(baseURL: baseURL, origin: origin).publicValue
-    }
-
-    /// Existing ASR/LLM callers use this boundary. `url` and `method` are kept
-    /// in the signature for call-site compatibility; the current contract is
-    /// Bearer-only and does not create a per-request proof.
-    func authorizedHeaders(for url: URL, method: String,
-                           baseURL: URL) async throws -> [String: String] {
-        try validateTarget(url, belongsTo: baseURL)
-        let current = try await session(for: baseURL)
-        var headers = Self.clientMetadataHeaders
-        headers.merge([
-            "Authorization": "Bearer \(current.accessToken)",
-            "X-Viva-Device-ID": current.deviceID,
-            "X-Viva-Protocol-Version": "1",
-        ], uniquingKeysWith: { _, new in new })
-        return headers
-    }
-
-    /// Marks the saved access token expired. The next caller joins one forced
-    /// refresh instead of reloading the same revoked token from local storage.
-    func invalidateAccessToken(baseURL: URL) throws {
-        let origin = try originString(baseURL)
-        guard var current = try storedSession(origin: origin) else { return }
-        current.expiresAt = .distantPast
-        try persist(current, origin: origin)
-        memory[origin] = current
-    }
-
-    /// A protected endpoint rejected both the current and refreshed access
-    /// token, or reported that the account is no longer usable.
-    func clearRejectedSession(baseURL: URL) async throws {
-        let origin = try originString(baseURL)
-        try clearSession(origin: origin)
-        await state.signedOut(origin: origin)
+        return try await refreshSingleFlight(baseURL: baseURL, origin: origin)
     }
 
     /// Applies the authoritative post-billing balance returned by LLM SSE/JSON.
@@ -712,23 +717,23 @@ actor ManagedBackendAuth: VivaAccountClient {
         do {
             let response: TokenResponse = try await send(
                 path: "/v1/auth/refresh", method: "POST", body: body,
+                deviceID: current.deviceID,
                 headers: ["Idempotency-Key": idempotencyKey], baseURL: baseURL)
             guard let expiresAt = Self.parseDate(response.expiresAt),
                   !response.accessToken.isEmpty, !response.refreshToken.isEmpty else {
                 throw AuthError.invalidResponse
             }
-            let refreshed = StoredSession(accessToken: response.accessToken,
-                                          refreshToken: response.refreshToken,
-                                          expiresAt: expiresAt,
-                                          deviceID: current.deviceID,
-                                          pendingRefreshID: nil)
+            let refreshed = StoredSession(
+                accessToken: response.accessToken, refreshToken: response.refreshToken,
+                expiresAt: expiresAt, deviceID: current.deviceID,
+                pendingRefreshID: nil)
             try persist(refreshed, origin: origin)
             memory[origin] = refreshed
             await state.sessionRestored(origin: origin, deviceID: refreshed.deviceID)
             return refreshed
         } catch let error as AuthError {
-            if case .server(let statusCode, let code, _, _) = error,
-               statusCode == 401 || code == "INVALID_REFRESH_TOKEN" {
+            if case .server(_, let code, _, _) = error,
+               code == "INVALID_REFRESH_TOKEN" {
                 try? clearSession(origin: origin)
                 await state.signedOut(origin: origin)
                 throw AuthError.notLoggedIn
@@ -743,46 +748,165 @@ actor ManagedBackendAuth: VivaAccountClient {
     private func authorized<Response: Decodable>(path: String, method: String = "GET",
                                                   body: Data? = nil,
                                                   baseURL: URL) async throws -> Response {
-        let first = try await session(for: baseURL)
-        do {
-            return try await send(path: path, method: method, body: body,
-                                  bearer: first.accessToken, baseURL: baseURL)
-        } catch let error as AuthError {
-            if Self.isAccountUnavailable(error) {
-                try await clearRejectedSession(baseURL: baseURL)
-                throw AuthError.notLoggedIn
-            }
-            guard Self.isUnauthorized(error) else { throw error }
-            let origin = try originString(baseURL)
-            let refreshed = try await refreshSingleFlight(baseURL: baseURL, origin: origin)
-            do {
-                return try await send(path: path, method: method, body: body,
-                                      bearer: refreshed.accessToken, baseURL: baseURL)
-            } catch let retryError as AuthError {
-                if Self.isUnauthorized(retryError) || Self.isAccountUnavailable(retryError) {
-                    try? clearSession(origin: origin)
-                    await state.signedOut(origin: origin)
-                    throw AuthError.notLoggedIn
-                }
-                throw retryError
-            }
+        guard let url = append(path, to: baseURL) else { throw AuthError.invalidEndpoint }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.timeoutInterval = 15
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let (data, _) = try await authorizedData(for: request, baseURL: baseURL)
+        guard let decoded = try? networkDecoder.decode(Response.self, from: data) else {
+            throw AuthError.invalidResponse
+        }
+        return decoded
+    }
+
+    private func authorizedWithoutResponse(path: String, method: String,
+                                           body: Data?, baseURL: URL) async throws {
+        guard let url = append(path, to: baseURL) else { throw AuthError.invalidEndpoint }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.timeoutInterval = 15
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        _ = try await authorizedData(for: request, baseURL: baseURL)
+    }
+
+    func authorizedData(for original: URLRequest,
+                        baseURL: URL) async throws -> (Data, HTTPURLResponse) {
+        guard let url = original.url else { throw AuthError.invalidEndpoint }
+        try validateTarget(url, belongsTo: baseURL)
+        let origin = try originString(baseURL)
+        let current = try await activeSession(baseURL: baseURL, origin: origin)
+
+        let firstRequest = try prepareAuthorizedRequest(original, session: current)
+        let (firstData, firstResponse) = try await URLSession.shared.data(for: firstRequest)
+        guard let firstHTTP = firstResponse as? HTTPURLResponse else {
+            throw AuthError.invalidResponse
+        }
+        if (200...299).contains(firstHTTP.statusCode) { return (firstData, firstHTTP) }
+
+        let firstError = serverError(
+            response: firstHTTP, data: firstData, path: url.path)
+        let retrySession = try await recoverySession(
+            after: firstError, baseURL: baseURL, origin: origin)
+        let retryRequest = try prepareAuthorizedRequest(original, session: retrySession)
+        let (retryData, retryResponse) = try await URLSession.shared.data(for: retryRequest)
+        guard let retryHTTP = retryResponse as? HTTPURLResponse else {
+            throw AuthError.invalidResponse
+        }
+        if (200...299).contains(retryHTTP.statusCode) { return (retryData, retryHTTP) }
+
+        let retryError = serverError(
+            response: retryHTTP, data: retryData, path: url.path)
+        try await handleTerminalAuthorizationFailure(retryError, origin: origin)
+        throw retryError
+    }
+
+    func authorizedBytes(for original: URLRequest,
+                         baseURL: URL) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+        guard let url = original.url else { throw AuthError.invalidEndpoint }
+        try validateTarget(url, belongsTo: baseURL)
+        let origin = try originString(baseURL)
+        let current = try await activeSession(baseURL: baseURL, origin: origin)
+
+        let firstRequest = try prepareAuthorizedRequest(original, session: current)
+        let (firstBytes, firstResponse) = try await URLSession.shared.bytes(for: firstRequest)
+        guard let firstHTTP = firstResponse as? HTTPURLResponse else {
+            throw AuthError.invalidResponse
+        }
+        if (200...299).contains(firstHTTP.statusCode) { return (firstBytes, firstHTTP) }
+
+        let firstData = try await collectErrorBody(firstBytes)
+        let firstError = serverError(
+            response: firstHTTP, data: firstData, path: url.path)
+        let retrySession = try await recoverySession(
+            after: firstError, baseURL: baseURL, origin: origin)
+        let retryRequest = try prepareAuthorizedRequest(original, session: retrySession)
+        let (retryBytes, retryResponse) = try await URLSession.shared.bytes(for: retryRequest)
+        guard let retryHTTP = retryResponse as? HTTPURLResponse else {
+            throw AuthError.invalidResponse
+        }
+        if (200...299).contains(retryHTTP.statusCode) { return (retryBytes, retryHTTP) }
+
+        let retryData = try await collectErrorBody(retryBytes)
+        let retryError = serverError(
+            response: retryHTTP, data: retryData, path: url.path)
+        try await handleTerminalAuthorizationFailure(retryError, origin: origin)
+        throw retryError
+    }
+
+    private func collectErrorBody(_ bytes: URLSession.AsyncBytes) async throws -> Data {
+        var data = Data()
+        data.reserveCapacity(1024)
+        for try await byte in bytes where data.count < 64 * 1024 {
+            data.append(byte)
+        }
+        return data
+    }
+
+    private func prepareAuthorizedRequest(_ original: URLRequest,
+                                          session: StoredSession) throws -> URLRequest {
+        guard original.url != nil else { throw AuthError.invalidEndpoint }
+        var request = original
+        request.setValue(nil, forHTTPHeaderField: "DPoP")
+        for (name, value) in Self.clientMetadataHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(session.deviceID, forHTTPHeaderField: "X-Viva-Device-ID")
+        request.setValue("1", forHTTPHeaderField: "X-Viva-Protocol-Version")
+        return request
+    }
+
+    private func recoverySession(after error: AuthError, baseURL: URL,
+                                 origin: String) async throws -> StoredSession {
+        guard case .server(let statusCode, let code, _, _) = error else { throw error }
+        if statusCode == 403, code == "ACCOUNT_UNAVAILABLE" {
+            try? clearSession(origin: origin)
+            await state.signedOut(origin: origin)
+            throw error
+        }
+        guard statusCode == 401 else { throw error }
+
+        switch code {
+        case "UNAUTHORIZED":
+            return try await refreshSingleFlight(baseURL: baseURL, origin: origin)
+        default:
+            throw error
         }
     }
 
-    private static func isUnauthorized(_ error: AuthError) -> Bool {
-        if case .server(let statusCode, _, _, _) = error { return statusCode == 401 }
-        return false
-    }
-
-    private static func isAccountUnavailable(_ error: AuthError) -> Bool {
-        if case .server(let statusCode, let code, _, _) = error {
-            return statusCode == 403 && code == "ACCOUNT_UNAVAILABLE"
+    private func handleTerminalAuthorizationFailure(_ error: AuthError,
+                                                    origin: String) async throws {
+        guard case .server(let statusCode, let code, _, _) = error else { return }
+        if statusCode == 403, code == "ACCOUNT_UNAVAILABLE" {
+            try? clearSession(origin: origin)
+            await state.signedOut(origin: origin)
+            return
         }
-        return false
+        guard statusCode == 401 else { return }
+        switch code {
+        case "UNAUTHORIZED":
+            try? clearSession(origin: origin)
+            await state.signedOut(origin: origin)
+            throw AuthError.notLoggedIn
+        default:
+            break
+        }
     }
 
     private func send<Response: Decodable>(path: String, method: String,
-                                           body: Data? = nil, bearer: String? = nil,
+                                           body: Data? = nil,
+                                           deviceID: String? = nil,
                                            headers: [String: String] = [:],
                                            baseURL: URL) async throws -> Response {
         guard let url = append(path, to: baseURL) else { throw AuthError.invalidEndpoint }
@@ -795,35 +919,37 @@ actor ManagedBackendAuth: VivaAccountClient {
         for (name, value) in Self.clientMetadataHeaders {
             request.setValue(value, forHTTPHeaderField: name)
         }
-        if let deviceID = try? stableDeviceID() {
+        if let deviceID = deviceID ?? (try? stableDeviceID()) {
             request.setValue(deviceID, forHTTPHeaderField: "X-Viva-Device-ID")
         }
         if body != nil {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-        if let bearer {
-            request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         }
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
         guard (200...299).contains(http.statusCode) else {
-            let envelope = try? networkDecoder.decode(ErrorEnvelope.self, from: data)
-            let code = envelope?.error.code ?? "HTTP_\(http.statusCode)"
-            let message = envelope?.error.message ?? "Viva 服务请求失败"
-            let requestID = envelope?.error.requestId
-                ?? http.value(forHTTPHeaderField: "X-Request-ID")
-            Log.warn("Viva API \(path) HTTP \(http.statusCode) code=\(code)"
-                     + (requestID.map { " request_id=\($0)" } ?? ""))
-            throw AuthError.server(statusCode: http.statusCode, code: code,
-                                   message: message, requestID: requestID)
+            throw serverError(response: http, data: data, path: path)
         }
         do {
             return try networkDecoder.decode(Response.self, from: data)
         } catch {
             throw AuthError.invalidResponse
         }
+    }
+
+    private func serverError(response: HTTPURLResponse, data: Data,
+                             path: String) -> AuthError {
+        let envelope = try? networkDecoder.decode(ErrorEnvelope.self, from: data)
+        let code = envelope?.error.code ?? "HTTP_\(response.statusCode)"
+        let message = envelope?.error.message ?? "Viva 服务请求失败"
+        let requestID = envelope?.error.requestId
+            ?? response.value(forHTTPHeaderField: "X-Request-ID")
+        Log.warn("Viva API \(path) HTTP \(response.statusCode) code=\(code)"
+                 + (requestID.map { " request_id=\($0)" } ?? ""))
+        return AuthError.server(statusCode: response.statusCode, code: code,
+                                message: message, requestID: requestID)
     }
 
     // MARK: - Credential storage
@@ -1065,11 +1191,20 @@ actor ManagedBackendAuth: VivaAccountClient {
         return value
     }
 
+    private static func normalizedAccount(_ raw: String) throws -> String {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty, value.utf8.count <= 320,
+              !value.contains(where: \Character.isWhitespace) else {
+            throw AuthError.invalidInput("请输入账号或邮箱")
+        }
+        return value
+    }
+
     private static func validateNewPassword(_ password: String, email: String) throws {
-        guard password.count >= 15, password.count <= 128,
+        guard password.count >= 8, password.count <= 128,
               !password.contains("\n"), !password.contains("\r"),
               !password.contains("\0") else {
-            throw AuthError.invalidInput("密码需为 15–128 个字符")
+            throw AuthError.invalidInput("密码需为 8–128 个字符")
         }
         let localPart = email.split(separator: "@", maxSplits: 1).first.map(String.init) ?? ""
         if localPart.count >= 3,
