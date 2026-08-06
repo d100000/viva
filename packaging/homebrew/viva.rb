@@ -1,6 +1,6 @@
 cask "viva" do
   version "0.15.0"
-  sha256 "22b8493a153d23366c2422a30c99ac9daf501e2d0e823856507f38e21cbb8a26"
+  sha256 "e104879104ec413d30feac6fada8182a23eaf19b52d91aea4a9b1d9ef68281d2"
 
   url "https://github.com/d100000/viva/releases/download/v#{version}/Viva-#{version}.dmg"
   name "Viva"

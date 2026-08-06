@@ -63,10 +63,13 @@ struct ManagedWallet: Codable, Equatable, Sendable {
 struct ManagedPricing: Codable, Equatable, Sendable {
     let version: String
     let pointsPerCny: Int64
-    let retailMultiplierBp: Int64
     let fixedRequestPoints: Int64
     let minimumRequestPoints: Int64
-    let seedAsrNanoPerHour: Int64
+    // Older servers exposed these internal pricing fields. The current public
+    // balance contract intentionally omits them, so they remain decode-only
+    // compatibility values rather than requirements for restoring a session.
+    let retailMultiplierBp: Int64?
+    let seedAsrNanoPerHour: Int64?
 }
 
 struct ManagedCreditBalance: Codable, Equatable, Sendable {
