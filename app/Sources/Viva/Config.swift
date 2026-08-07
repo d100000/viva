@@ -125,6 +125,9 @@ struct Config: Codable, Equatable {
     var holdThresholdMs: Int = 150
     /// 环形预缓冲时长(ms)：热键按下时把之前这么久的音频一并送出，解决首字丢失
     var preRollMs: Int = 400
+    /// true = 空闲时保持麦克风引擎预热，用预缓冲换取最低首字延迟。
+    /// false = 只在语音输入或本地麦克风测试时启动，空闲时释放系统麦克风。
+    var keepAudioEngineWarm: Bool = false
     /// Core Audio 设备 UID。留空表示始终跟随 macOS 的系统默认输入设备。
     var inputDeviceUID: String = ""
 
@@ -221,6 +224,7 @@ struct Config: Codable, Equatable {
         hotkeyModifiers = (try? c.decodeIfPresent(UInt64.self, forKey: .hotkeyModifiers)).flatMap { $0 } ?? def.hotkeyModifiers
         holdThresholdMs = i(.holdThresholdMs, def.holdThresholdMs)
         preRollMs = i(.preRollMs, def.preRollMs)
+        keepAudioEngineWarm = b(.keepAudioEngineWarm, def.keepAudioEngineWarm)
         inputDeviceUID = s(.inputDeviceUID, def.inputDeviceUID)
         useClipboardPaste = b(.useClipboardPaste, def.useClipboardPaste)
         clipboardRestoreDelayMs = i(.clipboardRestoreDelayMs, def.clipboardRestoreDelayMs)

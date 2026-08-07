@@ -179,9 +179,9 @@ final class VoiceSession {
             if !testMode { hud.flash(message: app.lastError, isError: true) }
             return
         }
-        // ⚠️ 判据是 canStart 而不是 isRunning。蓝牙输入设备下引擎故意不常驻，
-        //   isRunning 恒为 false 是预期状态 —— 用 isRunning 拦会让所有蓝牙耳机
-        //   用户完全无法录音（详见 AudioCapture.canStart 的注释）。
+        // ⚠️ 判据是 canStart 而不是 isRunning。蓝牙设备或用户选择按需模式时，
+        //   空闲期的 isRunning 为 false 是预期状态 —— 用它当就绪判据
+        //   会让按需模式完全无法录音（详见 AudioCapture.canStart 的注释）。
         guard capture.canStart else {
             app.lastError = "麦克风未就绪，检查系统设置里的麦克风权限"
             if !testMode { hud.flash(message: app.lastError, isError: true) }
@@ -249,10 +249,10 @@ final class VoiceSession {
         }
 
         // 把热键按下之前那段音频一并送出 —— 这就是「不吃掉你的前三个字」
-        // （蓝牙路径没有 preRoll：引擎就是在这一行才启动的）
+        // （蓝牙或按需模式没有热键之前的 preRoll：引擎在这里才启动）
         let preRoll = capture.startCapturing()
 
-        // 蓝牙路径下引擎是在上面这一行才真正起来的，失败必须在这里兜住。
+        // 按需路径下引擎是在上面这一行才真正起来的，失败必须在这里兜住。
         // 否则会留下一个永远收不到音频的会话，用户说完一整段才发现什么都没出来。
         guard capture.isRunning else {
             Log.error("即时启动采集失败 —— 设备可能被占用或已断开")

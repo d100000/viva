@@ -411,10 +411,13 @@ struct SettingsView: View {
                                 set: { state.config.preRollMs = Int($0) }),
                                    in: 0...800, step: 100)
                                 .frame(width: 220)
+                                .disabled(!state.config.keepAudioEngineWarm)
                             Text("\(state.config.preRollMs) ms").monospacedDigit()
                                 .font(.caption).foregroundStyle(.secondary)
                         }
-                        Text("按下热键时，把此前这段时间的音频一并送出，解决「开头几个字被吃掉」。豆包官方 Mac 输入法实测就有这个毛病。")
+                        Text(state.config.keepAudioEngineWarm
+                             ? "按下热键时，把此前这段时间的音频一并送出，减少开头几个字被吃掉。"
+                             : "开启“加速引擎”后生效，可减少句首内容遗漏。")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
 
@@ -1145,6 +1148,24 @@ private struct MicrophoneSettingsSection: View {
 
                     Spacer()
                 }
+
+                Divider()
+
+                Toggle("加速引擎",
+                       isOn: $state.config.keepAudioEngineWarm)
+                    .disabled(state.isListening || state.audioInputTestRunning)
+
+                Label {
+                    Text(state.config.keepAudioEngineWarm
+                         ? "引擎会提前就绪，按下热键即可开始采集，减少句首内容遗漏，让整句话识别得更完整。开启后，macOS 会在空闲时显示麦克风正在使用；蓝牙设备仍会按需启动。"
+                         : "默认关闭，由你选择开启。关闭时只在语音输入或麦克风测试时启动，空闲时不持续使用麦克风。")
+                } icon: {
+                    Image(systemName: state.config.keepAudioEngineWarm
+                          ? "bolt.fill" : "bolt")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
 

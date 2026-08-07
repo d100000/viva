@@ -508,7 +508,10 @@ private struct ReadinessCard: View {
                 Divider()
                 CheckRow(ok: state.audioEngineReady, title: "麦克风引擎",
                          detail: state.audioEngineReady
-                            ? "已预热常驻（消除首字丢失）" : "未启动",
+                            ? (state.appliedConfig.keepAudioEngineWarm
+                               ? "加速引擎已开启（蓝牙设备仍按需启动）"
+                               : "加速引擎未开启（空闲时不使用麦克风）")
+                            : "未启动",
                          action: nil)
                 Divider()
                 CheckRow(ok: state.hotkeyHealthy, title: "全局热键",

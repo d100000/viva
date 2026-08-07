@@ -6,10 +6,10 @@ import AudioToolbox
 /// 麦克风采集：设备原生格式 → 16kHz / 16bit / 单声道 PCM，按 200ms 分包。
 ///
 /// 两个关键设计：
-/// 1. **引擎常驻空转**（`prewarm`）—— 热键按下才启动引擎会有 100~300ms 冷启动，
-///    开头几个字必丢。豆包官方 Mac 输入法实测就有这个毛病。
-/// 2. **环形预缓冲**（`preRollMs`）—— 即使不在录音状态也持续保留最近 400ms 音频，
-///    热键按下瞬间把这段一并送出。这是「不吃掉你的前三个字」的实现。
+/// 1. **可选的引擎常驻预热**（`prewarm`）—— 默认关闭，空闲时释放麦克风；
+///    用户也可开启常驻，避免按热键后 100~300ms 的冷启动延迟。
+/// 2. **环形预缓冲**（`preRollMs`）—— 常驻模式下持续保留最近 400ms 音频，
+///    热键按下瞬间把这段一并送出。按需模式下没有热键之前的预缓冲。
 final class AudioCapture {
 
     private var engine = AVAudioEngine()
@@ -32,6 +32,7 @@ final class AudioCapture {
     private(set) var isTesting = false
     private(set) var isRunning = false
     private var selectedInputUID: String
+    private var keepEngineWarm: Bool
     private var runningDeviceIsBluetooth = false
     /// ⚠️ 必须持有并在 stopEngine 里移除。原来直接丢弃返回的 token，
     ///   而 rebuild() 内部又会调 prewarm() 再注册一个 —— 观察者数量会
@@ -45,9 +46,10 @@ final class AudioCapture {
     /// 本地麦克风测试的音量，不参与识别和计费
     var onTestLevel: ((Float) -> Void)?
 
-    init(preRollMs: Int, inputDeviceUID: String = "") {
+    init(preRollMs: Int, inputDeviceUID: String = "", keepEngineWarm: Bool = false) {
         preRollMaxBytes = 16000 * 2 * max(0, preRollMs) / 1000
         selectedInputUID = inputDeviceUID
+        self.keepEngineWarm = keepEngineWarm
     }
 
     // MARK: - 权限
@@ -94,11 +96,15 @@ final class AudioCapture {
         (try? AudioInputDevices.resolve(uid: selectedInputUID)) != nil
     }
 
-    /// App 启动时调用一次。引擎从此常驻，`isCapturing` 只控制数据往不往外送。
+    /// App 启动时调用一次。常驻模式会启动引擎；按需模式只校验设备。
     ///
     /// - Parameter force: 忽略蓝牙判断强行预热（热键按下时用）
     func prewarm(force: Bool = false) throws {
         let device = try AudioInputDevices.resolve(uid: selectedInputUID)
+        if !force, !keepEngineWarm {
+            Log.info("麦克风引擎使用按需模式，空闲时不预热")
+            return
+        }
         if !force, device.isBluetooth {
             Log.info("输入设备「\(device.name)」是蓝牙设备，跳过常驻预热 —— 避免把耳机永久拉进 HFP 通话模式")
             return
@@ -228,6 +234,19 @@ final class AudioCapture {
         }
     }
 
+    /// 更新空闲时的引擎策略。关闭常驻时会立即释放空闲引擎；
+    /// 正在录音或测试时只记住新策略，等本轮结束后再释放。
+    func setKeepEngineWarm(_ enabled: Bool) {
+        keepEngineWarm = enabled
+        if !enabled, !isCapturing, !isTesting {
+            lock.lock()
+            pending = Data()
+            preRoll = Data()
+            lock.unlock()
+            stopEngine()
+        }
+    }
+
     /// 切换输入硬件。设备 UID 为空时恢复为“跟随系统默认”。
     /// 蓝牙设备只校验可用性，不常驻启动；实际录音或测试时再按需启动。
     func setInputDevice(uid: String, shouldPrewarm: Bool = true) throws {
@@ -251,8 +270,8 @@ final class AudioCapture {
     /// 开始录音。返回预缓冲里攒下的音频（热键按下之前的那 400ms），应当作为第一批发出去。
     func startCapturing() -> Data {
         if isTesting { stopTesting() }
-        // 蓝牙路径下引擎是不常驻的，按下热键才启动。
-        // 代价是没有 preRoll，但换来的是耳机不会被长期拉进通话模式。
+        // 蓝牙设备或用户选择按需模式时，按下热键才启动引擎。
+        // 代价是没有热键之前的 preRoll，但空闲时不会占用麦克风。
         if !isRunning {
             do { try prewarm(force: true) }
             catch { Log.error("即时启动采集失败：\(error.localizedDescription)") }
@@ -285,7 +304,7 @@ final class AudioCapture {
         preRoll = Data()
         lock.unlock()
         Log.info("停止采集：尾部 \(tail.count) 字节")
-        if runningDeviceIsBluetooth { stopEngine() }
+        if runningDeviceIsBluetooth || !keepEngineWarm { stopEngine() }
         return tail
     }
 
@@ -316,7 +335,7 @@ final class AudioCapture {
         pending = Data()
         preRoll = Data()
         lock.unlock()
-        if runningDeviceIsBluetooth { stopEngine() }
+        if runningDeviceIsBluetooth || !keepEngineWarm { stopEngine() }
     }
 
     // MARK: - 处理

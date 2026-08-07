@@ -45,7 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
 
         capture = AudioCapture(preRollMs: state.config.preRollMs,
-                               inputDeviceUID: state.config.inputDeviceUID)
+                               inputDeviceUID: state.config.inputDeviceUID,
+                               keepEngineWarm: state.config.keepAudioEngineWarm)
         session = VoiceSession(config: state.config, capture: capture, hud: hud)
         capture.onTestLevel = { [weak self] level in
             guard let self, self.state.audioInputTestRunning else { return }
@@ -288,9 +289,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 do {
-                    try self.capture.prewarm()      // 引擎常驻，消除冷启动丢字
-                    self.state.audioEngineReady = true
-                    Log.info("麦克风就绪（引擎已预热）")
+                    try self.capture.prewarm()
+                    self.state.audioEngineReady = self.capture.canStart
+                    Log.info(self.capture.isRunning
+                             ? "麦克风就绪（引擎已预热）"
+                             : "麦克风就绪（按需启动）")
                 } catch {
                     self.state.audioEngineReady = false
                     self.state.lastError = "麦克风初始化失败：\(error.localizedDescription)"
@@ -560,6 +563,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ── 音频链路 ──
         capture.setPreRoll(ms: new.preRollMs)
         let inputDeviceChanged = old == nil || old!.inputDeviceUID != new.inputDeviceUID
+        let enginePolicyChanged = old == nil
+            || old!.keepAudioEngineWarm != new.keepAudioEngineWarm
+        capture.setKeepEngineWarm(new.keepAudioEngineWarm)
 
         if inputDeviceChanged {
             stopInputTest()
@@ -577,6 +583,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.error(state.lastError)
             }
             refreshInputDevices()
+        } else if enginePolicyChanged {
+            do {
+                if state.micGranted { try capture.prewarm() }
+                state.audioEngineReady = state.micGranted && capture.canStart
+                state.audioInputError = ""
+                state.lastError = ""
+            } catch {
+                state.audioEngineReady = false
+                state.audioInputError = error.localizedDescription
+                state.lastError = "麦克风运行模式切换失败：\(error.localizedDescription)"
+                Log.error(state.lastError)
+            }
         }
 
         // ── 热键：只有三要素（或长按阈值）变了才重建 CGEventTap ──
@@ -610,7 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         syncHotkeyActivation(forceRetry: hotkeyChanged)
 
         buildMenu()
-        Log.info("配置已重新加载（输入设备切换：\(inputDeviceChanged ? "是" : "否")，热键重建：\(hotkeyChanged ? "是" : "否")）")
+        Log.info("配置已重新加载（输入设备切换：\(inputDeviceChanged ? "是" : "否")，麦克风引擎策略切换：\(enginePolicyChanged ? "是" : "否")，热键重建：\(hotkeyChanged ? "是" : "否")）")
     }
 
     // MARK: - 输入设备与本地测试
